@@ -17,7 +17,8 @@ const (
 
 // Defaults
 const (
-	DefaultModel = "gpt-5.1-chat"
+	DefaultModel         = "gpt-5.1-chat"
+	DefaultSystemMessage = "Be precise and concise."
 )
 
 // Errors

@@ -122,7 +122,7 @@ func run(cmd *cobra.Command, args []string) {
 	log.Printf("WebSearch: %v", cfg.WebSearch)
 
 	// Build system prompt and user message
-	systemPrompt := "Be precise and concise."
+	systemPrompt := config.DefaultSystemMessage
 	userMessage := query
 
 	// Web search if requested
@@ -183,7 +183,7 @@ func runInteractive() {
 
 	client := api.NewAzureClient(cfg)
 	messages := []api.Message{
-		{Role: "system", Content: "Be precise and concise."},
+		{Role: "system", Content: config.DefaultSystemMessage},
 	}
 
 	for {
@@ -196,6 +196,7 @@ func runInteractive() {
 				fmt.Println("Goodbye!")
 				return
 			}
+			display.ShowError(fmt.Sprintf("Error reading input: %v", err))
 			continue
 		}
 
@@ -243,22 +244,21 @@ func handleCommand(input string, messages *[]api.Message, client *api.AzureClien
 
 	case "/clear", "/c":
 		*messages = []api.Message{
-			{Role: "system", Content: "Be precise and concise."},
+			{Role: "system", Content: config.DefaultSystemMessage},
 		}
 		fmt.Println("Conversation cleared.")
 
 	case "/help", "/h":
-		fmt.Println(`
-Commands:
-  /exit, /quit, /q  - Exit interactive mode
-  /clear, /c        - Clear conversation history
-  /web <query>      - Search web and ask about results
-  /web on           - Enable auto web search for all messages
-  /web off          - Disable auto web search
-  /model <name>     - Switch model
-  /model            - Show current model
-  /help, /h         - Show this help
-`)
+		fmt.Println("\nCommands:")
+		fmt.Printf("  %-18s %s\n", "/exit, /quit, /q", "Exit interactive mode")
+		fmt.Printf("  %-18s %s\n", "/clear, /c", "Clear conversation history")
+		fmt.Printf("  %-18s %s\n", "/web <query>", "Search web and ask about results")
+		fmt.Printf("  %-18s %s\n", "/web on", "Enable auto web search for all messages")
+		fmt.Printf("  %-18s %s\n", "/web off", "Disable auto web search")
+		fmt.Printf("  %-18s %s\n", "/model <name>", "Switch model")
+		fmt.Printf("  %-18s %s\n", "/model", "Show current model")
+		fmt.Printf("  %-18s %s\n", "/help, /h", "Show this help")
+		fmt.Println()
 
 	case "/model":
 		if len(parts) > 1 {
