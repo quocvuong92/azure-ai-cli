@@ -9,26 +9,31 @@ import (
 
 // Environment variable names
 const (
-	EnvAzureEndpoint = "AZURE_OPENAI_ENDPOINT"
-	EnvAzureAPIKey   = "AZURE_OPENAI_API_KEY"
-	EnvAzureModels   = "AZURE_OPENAI_MODELS"
-	EnvTavilyAPIKeys = "TAVILY_API_KEYS"
+	EnvAzureEndpoint     = "AZURE_OPENAI_ENDPOINT"
+	EnvAzureAPIKey       = "AZURE_OPENAI_API_KEY"
+	EnvAzureModels       = "AZURE_OPENAI_MODELS"
+	EnvTavilyAPIKeys     = "TAVILY_API_KEYS"
+	EnvLinkupAPIKeys     = "LINKUP_API_KEYS"
+	EnvBraveAPIKeys      = "BRAVE_API_KEYS"
+	EnvWebSearchProvider = "WEB_SEARCH_PROVIDER"
 )
 
 // Defaults
 const (
-	DefaultModel         = "gpt-5.1-chat"
-	DefaultSystemMessage = "Be precise and concise."
+	DefaultModel          = "gpt-5.1-chat"
+	DefaultSystemMessage  = "Be precise and concise."
+	DefaultSearchProvider = "tavily"
 )
 
 // Errors
 var (
-	ErrEndpointNotFound  = errors.New("Azure endpoint not found. Set AZURE_OPENAI_ENDPOINT environment variable")
-	ErrAPIKeyNotFound    = errors.New("Azure API key not found. Set AZURE_OPENAI_API_KEY environment variable")
-	ErrModelNotFound     = errors.New("model not found. Set AZURE_OPENAI_MODEL or use --model flag")
-	ErrInvalidModel      = errors.New("invalid model specified")
-	ErrNoAvailableKeys   = errors.New("all API keys exhausted")
-	ErrTavilyKeyNotFound = errors.New("Tavily API key not found. Set TAVILY_API_KEYS or TAVILY_API_KEY to use --web flag")
+	ErrEndpointNotFound      = errors.New("Azure endpoint not found. Set AZURE_OPENAI_ENDPOINT environment variable")
+	ErrAPIKeyNotFound        = errors.New("Azure API key not found. Set AZURE_OPENAI_API_KEY environment variable")
+	ErrModelNotFound         = errors.New("model not found. Set AZURE_OPENAI_MODEL or use --model flag")
+	ErrInvalidModel          = errors.New("invalid model specified")
+	ErrNoAvailableKeys       = errors.New("all API keys exhausted")
+	ErrWebSearchKeyNotFound  = errors.New("web search API key not found. Set TAVILY_API_KEYS, LINKUP_API_KEYS, or BRAVE_API_KEYS to use --web flag")
+	ErrInvalidSearchProvider = errors.New("invalid search provider. Use 'tavily', 'linkup', or 'brave'")
 )
 
 // Error codes that should trigger key rotation (for Tavily)
@@ -46,6 +51,19 @@ type Config struct {
 	TavilyAPIKey        string
 	TavilyAPIKeys       []string
 	TavilyCurrentKeyIdx int
+
+	// Linkup (multiple keys for free tier rotation)
+	LinkupAPIKey        string
+	LinkupAPIKeys       []string
+	LinkupCurrentKeyIdx int
+
+	// Brave (multiple keys for free tier rotation)
+	BraveAPIKey        string
+	BraveAPIKeys       []string
+	BraveCurrentKeyIdx int
+
+	// Web search provider selection
+	WebSearchProvider string // "tavily", "linkup", or "brave"
 
 	// Flags
 	Stream      bool
@@ -105,16 +123,60 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("%w: %s. Available: %s", ErrInvalidModel, c.Model, c.GetAvailableModelsString())
 	}
 
-	// Load Tavily keys (optional, only required if --web is used)
+	// Load Tavily keys (optional, only required if --web is used with tavily provider)
 	c.TavilyAPIKeys = getTavilyKeysFromEnv()
 	if len(c.TavilyAPIKeys) > 0 {
 		c.TavilyCurrentKeyIdx = 0
 		c.TavilyAPIKey = c.TavilyAPIKeys[0]
 	}
 
-	// Validate Tavily keys if web search is requested
-	if c.WebSearch && len(c.TavilyAPIKeys) == 0 {
-		return ErrTavilyKeyNotFound
+	// Load Linkup keys (optional, only required if --web is used with linkup provider)
+	c.LinkupAPIKeys = getLinkupKeysFromEnv()
+	if len(c.LinkupAPIKeys) > 0 {
+		c.LinkupCurrentKeyIdx = 0
+		c.LinkupAPIKey = c.LinkupAPIKeys[0]
+	}
+
+	// Load Brave keys (optional, only required if --web is used with brave provider)
+	c.BraveAPIKeys = getBraveKeysFromEnv()
+	if len(c.BraveAPIKeys) > 0 {
+		c.BraveCurrentKeyIdx = 0
+		c.BraveAPIKey = c.BraveAPIKeys[0]
+	}
+
+	// Set web search provider (default to tavily, or auto-detect based on available keys)
+	if c.WebSearchProvider == "" {
+		c.WebSearchProvider = os.Getenv(EnvWebSearchProvider)
+	}
+	if c.WebSearchProvider == "" {
+		// Auto-detect: prefer tavily if available, then linkup, then brave
+		if len(c.TavilyAPIKeys) > 0 {
+			c.WebSearchProvider = "tavily"
+		} else if len(c.LinkupAPIKeys) > 0 {
+			c.WebSearchProvider = "linkup"
+		} else if len(c.BraveAPIKeys) > 0 {
+			c.WebSearchProvider = "brave"
+		} else {
+			c.WebSearchProvider = DefaultSearchProvider
+		}
+	}
+
+	// Validate provider
+	if c.WebSearchProvider != "tavily" && c.WebSearchProvider != "linkup" && c.WebSearchProvider != "brave" {
+		return ErrInvalidSearchProvider
+	}
+
+	// Validate web search keys if web search is requested
+	if c.WebSearch {
+		if c.WebSearchProvider == "tavily" && len(c.TavilyAPIKeys) == 0 {
+			return ErrWebSearchKeyNotFound
+		}
+		if c.WebSearchProvider == "linkup" && len(c.LinkupAPIKeys) == 0 {
+			return ErrWebSearchKeyNotFound
+		}
+		if c.WebSearchProvider == "brave" && len(c.BraveAPIKeys) == 0 {
+			return ErrWebSearchKeyNotFound
+		}
 	}
 
 	return nil
@@ -169,6 +231,76 @@ func (c *Config) GetTavilyKeyCount() int {
 // getTavilyKeysFromEnv retrieves Tavily API keys from environment variable
 func getTavilyKeysFromEnv() []string {
 	if keysEnv := os.Getenv(EnvTavilyAPIKeys); keysEnv != "" {
+		keys := strings.Split(keysEnv, ",")
+		var result []string
+		for _, key := range keys {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				result = append(result, key)
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+// RotateLinkupKey moves to the next available Linkup API key
+func (c *Config) RotateLinkupKey() (string, error) {
+	if len(c.LinkupAPIKeys) <= 1 {
+		return "", ErrNoAvailableKeys
+	}
+	nextIndex := c.LinkupCurrentKeyIdx + 1
+	if nextIndex >= len(c.LinkupAPIKeys) {
+		return "", ErrNoAvailableKeys
+	}
+	c.LinkupCurrentKeyIdx = nextIndex
+	c.LinkupAPIKey = c.LinkupAPIKeys[nextIndex]
+	return c.LinkupAPIKey, nil
+}
+
+// GetLinkupKeyCount returns the total number of Linkup keys
+func (c *Config) GetLinkupKeyCount() int {
+	return len(c.LinkupAPIKeys)
+}
+
+// getLinkupKeysFromEnv retrieves Linkup API keys from environment variable
+func getLinkupKeysFromEnv() []string {
+	if keysEnv := os.Getenv(EnvLinkupAPIKeys); keysEnv != "" {
+		keys := strings.Split(keysEnv, ",")
+		var result []string
+		for _, key := range keys {
+			key = strings.TrimSpace(key)
+			if key != "" {
+				result = append(result, key)
+			}
+		}
+		return result
+	}
+	return nil
+}
+
+// RotateBraveKey moves to the next available Brave API key
+func (c *Config) RotateBraveKey() (string, error) {
+	if len(c.BraveAPIKeys) <= 1 {
+		return "", ErrNoAvailableKeys
+	}
+	nextIndex := c.BraveCurrentKeyIdx + 1
+	if nextIndex >= len(c.BraveAPIKeys) {
+		return "", ErrNoAvailableKeys
+	}
+	c.BraveCurrentKeyIdx = nextIndex
+	c.BraveAPIKey = c.BraveAPIKeys[nextIndex]
+	return c.BraveAPIKey, nil
+}
+
+// GetBraveKeyCount returns the total number of Brave keys
+func (c *Config) GetBraveKeyCount() int {
+	return len(c.BraveAPIKeys)
+}
+
+// getBraveKeysFromEnv retrieves Brave API keys from environment variable
+func getBraveKeysFromEnv() []string {
+	if keysEnv := os.Getenv(EnvBraveAPIKeys); keysEnv != "" {
 		keys := strings.Split(keysEnv, ",")
 		var result []string
 		for _, key := range keys {

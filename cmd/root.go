@@ -34,6 +34,9 @@ var commandItems = []readline.PrefixCompleterInterface{
 	readline.PcItem("/web",
 		readline.PcItem("on"),
 		readline.PcItem("off"),
+		readline.PcItem("tavily"),
+		readline.PcItem("linkup"),
+		readline.PcItem("brave"),
 	),
 	readline.PcItem("/model"),
 }
@@ -42,14 +45,15 @@ var rootCmd = &cobra.Command{
 	Use:   "azure-ai [query]",
 	Short: "A CLI client for Azure OpenAI with web search",
 	Long: `Azure AI CLI is a command-line client for Azure OpenAI API,
-with optional web search powered by Tavily.
+with optional web search powered by Tavily, Linkup, or Brave.
 
-Supports multiple Tavily API keys with automatic rotation for free tier usage.
+Supports multiple API keys with automatic rotation for free tier usage.
 
 Examples:
   azure-ai "What is Kubernetes?"
   azure-ai -m gpt-4o "Explain Docker"
   azure-ai --web "Latest news on Go 1.24"
+  azure-ai --web --provider brave "Latest AI news"
   azure-ai -i                             # Interactive mode
   azure-ai -ir                            # Interactive with markdown rendering`,
 	Args: cobra.MaximumNArgs(1),
@@ -63,10 +67,11 @@ func init() {
 	rootCmd.Flags().BoolVarP(&cfg.Usage, "usage", "u", false, "Show token usage statistics")
 	rootCmd.Flags().BoolVarP(&cfg.Stream, "stream", "s", false, "Stream output in real-time")
 	rootCmd.Flags().BoolVarP(&cfg.Render, "render", "r", false, "Render markdown with colors and formatting")
-	rootCmd.Flags().BoolVarP(&cfg.WebSearch, "web", "w", false, "Search web first using Tavily (requires TAVILY_API_KEYS)")
+	rootCmd.Flags().BoolVarP(&cfg.WebSearch, "web", "w", false, "Search web first (requires TAVILY_API_KEYS, LINKUP_API_KEYS, or BRAVE_API_KEYS)")
 	rootCmd.Flags().BoolVarP(&cfg.Citations, "citations", "c", false, "Show citations/sources from web search")
 	rootCmd.Flags().BoolVarP(&cfg.Interactive, "interactive", "i", false, "Interactive chat mode")
 	rootCmd.Flags().StringVarP(&cfg.Model, "model", "m", "", "Model/deployment name (defaults to first in AZURE_OPENAI_MODELS)")
+	rootCmd.Flags().StringVarP(&cfg.WebSearchProvider, "provider", "p", "", "Web search provider: tavily, linkup, or brave (default: auto-detect)")
 	rootCmd.Flags().BoolVar(&listModels, "list-models", false, "List available models")
 }
 
@@ -161,9 +166,10 @@ func runInteractive() {
 	fmt.Println("Azure AI CLI - Interactive Mode")
 	fmt.Printf("Model: %s\n", cfg.Model)
 	if cfg.WebSearch {
-		fmt.Println("Web search: enabled (every message will search the web)")
+		fmt.Printf("Web search: enabled (provider: %s)\n", cfg.WebSearchProvider)
 	}
 	fmt.Println("Type /help for commands, Ctrl+C to quit, Tab for autocomplete")
+	fmt.Println("Tip: End a line with \\ for multiline input")
 	fmt.Println()
 
 	// Setup readline with autocomplete
@@ -200,7 +206,20 @@ func runInteractive() {
 			continue
 		}
 
-		input := strings.TrimSpace(line)
+		// Support multiline input with trailing backslash
+		input := line
+		for strings.HasSuffix(strings.TrimRight(input, " \t"), "\\") {
+			input = strings.TrimSuffix(strings.TrimRight(input, " \t"), "\\") + "\n"
+			rl.SetPrompt("... ")
+			nextLine, err := rl.Readline()
+			if err != nil {
+				break
+			}
+			input += nextLine
+		}
+		rl.SetPrompt("> ")
+
+		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
@@ -255,6 +274,7 @@ func handleCommand(input string, messages *[]api.Message, client *api.AzureClien
 		fmt.Printf("  %-18s %s\n", "/web <query>", "Search web and ask about results")
 		fmt.Printf("  %-18s %s\n", "/web on", "Enable auto web search for all messages")
 		fmt.Printf("  %-18s %s\n", "/web off", "Disable auto web search")
+		fmt.Printf("  %-18s %s\n", "/web <provider>", "Switch provider (tavily, linkup, brave)")
 		fmt.Printf("  %-18s %s\n", "/model <name>", "Switch model")
 		fmt.Printf("  %-18s %s\n", "/model", "Show current model")
 		fmt.Printf("  %-18s %s\n", "/help, /h", "Show this help")
@@ -286,20 +306,44 @@ func handleCommand(input string, messages *[]api.Message, client *api.AzureClien
 		if len(parts) < 2 {
 			status := "off"
 			if cfg.WebSearch {
-				status = "on"
+				status = fmt.Sprintf("on (provider: %s)", cfg.WebSearchProvider)
 			}
 			fmt.Printf("Web search: %s\n", status)
-			fmt.Println("Usage: /web <query> | /web on | /web off")
+			fmt.Println("Available providers: tavily, linkup, brave")
+			fmt.Println("Usage: /web <query> | /web on | /web off | /web provider <name>")
 			return false
 		}
 		arg := strings.TrimSpace(parts[1])
 		switch strings.ToLower(arg) {
 		case "on":
 			cfg.WebSearch = true
-			fmt.Println("Web search enabled for all messages.")
+			fmt.Printf("Web search enabled (provider: %s).\n", cfg.WebSearchProvider)
 		case "off":
 			cfg.WebSearch = false
 			fmt.Println("Web search disabled.")
+		case "provider":
+			if len(parts) > 1 {
+				// Check if there's a provider name after "provider"
+				providerParts := strings.SplitN(parts[1], " ", 2)
+				if len(providerParts) > 1 {
+					newProvider := strings.ToLower(strings.TrimSpace(providerParts[1]))
+					if newProvider == "tavily" || newProvider == "linkup" || newProvider == "brave" {
+						cfg.WebSearchProvider = newProvider
+						fmt.Printf("Web search provider changed to: %s\n", cfg.WebSearchProvider)
+					} else {
+						fmt.Printf("Invalid provider: %s\n", newProvider)
+						fmt.Println("Available providers: tavily, linkup, brave")
+					}
+				} else {
+					fmt.Printf("Current provider: %s\n", cfg.WebSearchProvider)
+					fmt.Println("Available providers: tavily, linkup, brave")
+					fmt.Println("Usage: /web provider <name>")
+				}
+			}
+		case "tavily", "linkup", "brave":
+			// Allow shorthand: /web tavily, /web linkup, /web brave
+			cfg.WebSearchProvider = strings.ToLower(arg)
+			fmt.Printf("Web search provider changed to: %s\n", cfg.WebSearchProvider)
 		default:
 			handleWebSearch(arg, messages, client)
 		}
@@ -312,9 +356,90 @@ func handleCommand(input string, messages *[]api.Message, client *api.AzureClien
 	return false
 }
 
+func optimizeSearchQuery(query string, messages []api.Message, client *api.AzureClient) (string, error) {
+	// Build messages for query optimization
+	// Include conversation history so LLM understands context
+	optimizeMessages := []api.Message{
+		{
+			Role: "system",
+			Content: `You are an expert search query optimizer. Your task is to transform a user's follow-up question into an effective web search query based on the conversation history.
+
+## Instructions:
+1. Read the conversation history to understand the context
+2. Extract key entities, topics, and technical terms from the conversation
+3. Create a search query that:
+   - Is self-contained (doesn't use pronouns like "it", "that", "this" without context)
+   - Includes specific names, versions, technologies mentioned in the conversation
+   - Uses search-friendly keywords (not conversational language)
+   - Is concise (typically 3-8 words)
+   - Focuses on finding factual, up-to-date information
+
+## Examples:
+- If conversation was about "Kubernetes v1.33 features" and user asks "why that version?" → output: "Kubernetes 1.33 release version naming reason"
+- If conversation was about "React hooks" and user asks "what about performance?" → output: "React hooks performance optimization"
+- If conversation was about "Python 3.12" and user asks "when was it released?" → output: "Python 3.12 release date"
+
+## Output ONLY the search query, nothing else. No quotes, no explanation.`,
+		},
+	}
+
+	// Add conversation history (skip original system message, limit to last 6 messages)
+	startIdx := 1 // Skip system message
+	if len(messages) > 7 {
+		startIdx = len(messages) - 6
+	}
+
+	for i := startIdx; i < len(messages); i++ {
+		msg := messages[i]
+		// Truncate long assistant responses to save tokens
+		if msg.Role == "assistant" && len(msg.Content) > 400 {
+			optimizeMessages = append(optimizeMessages, api.Message{
+				Role:    msg.Role,
+				Content: msg.Content[:400] + "...",
+			})
+		} else {
+			optimizeMessages = append(optimizeMessages, msg)
+		}
+	}
+
+	// Add the current query as the final user message
+	optimizeMessages = append(optimizeMessages, api.Message{
+		Role:    "user",
+		Content: fmt.Sprintf("Generate a search query for: %s", query),
+	})
+
+	sp := display.NewSpinner("Optimizing query...")
+	sp.Start()
+
+	resp, err := client.QueryWithHistory(optimizeMessages)
+	sp.Stop()
+
+	if err != nil {
+		return "", err
+	}
+
+	optimizedQuery := strings.TrimSpace(resp.GetContent())
+	// Remove quotes if the LLM wrapped the query in them
+	optimizedQuery = strings.Trim(optimizedQuery, "\"'`")
+
+	return optimizedQuery, nil
+}
+
 func handleWebSearch(query string, messages *[]api.Message, client *api.AzureClient) {
-	// Perform web search
-	searchContext, err := performWebSearch(query)
+	// Optimize search query using LLM if there's conversation context
+	optimizedQuery := query
+	if len(*messages) > 1 { // More than just system message
+		var err error
+		optimizedQuery, err = optimizeSearchQuery(query, *messages, client)
+		if err != nil {
+			// Fall back to original query if optimization fails
+			log.Printf("Query optimization failed: %v, using original query", err)
+			optimizedQuery = query
+		}
+	}
+
+	// Perform web search with optimized query
+	searchContext, err := performWebSearch(optimizedQuery)
 	if err != nil {
 		display.ShowError(err.Error())
 		return
@@ -422,15 +547,48 @@ func sendInteractiveMessage(client *api.AzureClient, messages []api.Message) (st
 }
 
 func performWebSearch(query string) (string, error) {
-	tavilyClient := api.NewTavilyClient(cfg)
-	tavilyClient.SetKeyRotationCallback(func(from, to, total int) {
-		display.ShowKeyRotation("Tavily", from, to, total)
-	})
-
 	sp := display.NewSpinner("Searching web...")
 	sp.Start()
 
-	results, err := tavilyClient.Search(query)
+	var results *api.TavilyResponse
+	var err error
+
+	switch cfg.WebSearchProvider {
+	case "linkup":
+		linkupClient := api.NewLinkupClient(cfg)
+		linkupClient.SetKeyRotationCallback(func(from, to, total int) {
+			display.ShowKeyRotation("Linkup", from, to, total)
+		})
+
+		linkupResults, searchErr := linkupClient.Search(query)
+		if searchErr != nil {
+			sp.Stop()
+			return "", searchErr
+		}
+		results = linkupResults.ToTavilyResponse()
+
+	case "brave":
+		braveClient := api.NewBraveClient(cfg)
+		braveClient.SetKeyRotationCallback(func(from, to, total int) {
+			display.ShowKeyRotation("Brave", from, to, total)
+		})
+
+		braveResults, searchErr := braveClient.Search(query)
+		if searchErr != nil {
+			sp.Stop()
+			return "", searchErr
+		}
+		results = braveResults.ToTavilyResponse()
+
+	default: // tavily
+		tavilyClient := api.NewTavilyClient(cfg)
+		tavilyClient.SetKeyRotationCallback(func(from, to, total int) {
+			display.ShowKeyRotation("Tavily", from, to, total)
+		})
+
+		results, err = tavilyClient.Search(query)
+	}
+
 	sp.Stop()
 
 	if err != nil {

@@ -1,14 +1,14 @@
 # Azure AI CLI
 
-A command-line client for Azure OpenAI API with optional web search powered by Tavily.
+A command-line client for Azure OpenAI API with optional web search powered by Tavily, Linkup, or Brave.
 
 ## Features
 
 - Chat with Azure OpenAI models (GPT-5.1, GPT-4o, etc.)
-- Web search integration via Tavily API
+- Web search integration via Tavily, Linkup, or Brave Search API
 - Streaming output support
 - Markdown rendering with syntax highlighting
-- Multiple Tavily API keys with automatic rotation (for free tier usage)
+- Multiple API keys with automatic rotation (for free tier usage)
 - Token usage statistics
 
 ## Installation
@@ -43,9 +43,19 @@ export AZURE_OPENAI_API_KEY="your-api-key"
 # Optional - Available models (comma-separated, first one is default)
 export AZURE_OPENAI_MODELS="gpt-5.1-chat,gpt-5.1,gpt-4o"
 
-# Optional - Tavily for web search (enables --web flag)
-# Supports multiple keys for free tier rotation
+# Optional - Web search providers (enables --web flag)
+# Tavily - supports multiple keys for free tier rotation
 export TAVILY_API_KEYS="tvly-key1,tvly-key2,tvly-key3"
+
+# Linkup - alternative web search provider
+export LINKUP_API_KEYS="linkup-key1,linkup-key2"
+
+# Brave Search - alternative web search provider
+export BRAVE_API_KEYS="brave-key1,brave-key2"
+
+# Optional - Select default web search provider (tavily, linkup, or brave)
+# If not set, auto-detects based on available keys (prefers Tavily)
+export WEB_SEARCH_PROVIDER="tavily"
 ```
 
 **Note:** If `AZURE_OPENAI_MODELS` is not set, the default model is `gpt-5.1-chat`.
@@ -92,6 +102,10 @@ azure-ai -w "Latest news on AI"
 
 # With citations/sources
 azure-ai -wc "What is the latest version of Kubernetes?"
+
+# Use specific provider
+azure-ai -w --provider linkup "Latest AI news"
+azure-ai -w -p brave "What happened today?"
 ```
 
 ### Combined Flags
@@ -125,7 +139,8 @@ azure-ai -v "Test query"
 | `--model` | `-m` | Model/deployment name |
 | `--stream` | `-s` | Stream output in real-time |
 | `--render` | `-r` | Render markdown with colors |
-| `--web` | `-w` | Search web first using Tavily |
+| `--web` | `-w` | Search web first using configured provider |
+| `--provider` | `-p` | Web search provider: tavily, linkup, or brave |
 | `--citations` | `-c` | Show citations/sources from web search |
 | `--interactive` | `-i` | Start interactive chat mode |
 | `--usage` | `-u` | Show token usage statistics |
@@ -137,19 +152,32 @@ azure-ai -v "Test query"
 
 When using `--web` flag:
 
-1. Tavily searches the web for relevant information
+1. The configured provider (Tavily, Linkup, or Brave) searches the web for relevant information
 2. Search results are sent to Azure OpenAI as context
 3. The model generates an answer based on the search results
 4. Sources are displayed at the end with citations
 
 The model will cite sources using `[1]`, `[2]`, etc. in its response.
 
-### Tavily API Key Rotation
+### Providers
 
-If you have multiple Tavily free accounts, you can provide multiple API keys:
+**Tavily** (default): Full-featured web search API with good results quality.
+- Get API keys at: https://tavily.com
+
+**Linkup**: Alternative web search provider.
+- Get API keys at: https://linkup.so
+
+**Brave Search**: Privacy-focused web search with generous free tier (2,000 queries/month).
+- Get API keys at: https://brave.com/search/api/
+
+### API Key Rotation
+
+All providers support multiple API keys for free tier rotation:
 
 ```bash
 export TAVILY_API_KEYS="tvly-key1,tvly-key2,tvly-key3"
+export LINKUP_API_KEYS="linkup-key1,linkup-key2"
+export BRAVE_API_KEYS="brave-key1,brave-key2"
 ```
 
 When one key hits rate limits (429) or is exhausted, the CLI automatically switches to the next key.
@@ -194,7 +222,7 @@ azure-ai -iwsr
 $ azure-ai -sri
 Azure AI CLI - Interactive Mode
 Model: gpt-5.1-chat
-Type /help for commands, /exit to quit
+Type /help for commands, Ctrl+C to quit, Tab for autocomplete
 
 > What is Kubernetes?
 Kubernetes is an open-source container orchestration platform...
@@ -203,7 +231,7 @@ Kubernetes is an open-source container orchestration platform...
 Building on what I explained about Kubernetes, here's how it compares...
 
 > /web on
-Web search enabled for all messages.
+Web search enabled (provider: tavily).
 
 > What is the latest Kubernetes version?
 [Searches web automatically]
