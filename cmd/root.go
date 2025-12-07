@@ -7,7 +7,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/c-bata/go-prompt"
+	"github.com/charmbracelet/bubbles/textinput"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 
 	"github.com/quocvuong92/azure-ai-cli/internal/api"
@@ -20,12 +22,279 @@ var (
 	verbose       bool
 	listModels    bool
 	searchResults *api.TavilyResponse // Store search results for citations
-
-	// Interactive mode state
-	interactiveClient   *api.AzureClient
-	interactiveMessages []api.Message
-	exitInteractive     bool
 )
+
+// Command suggestions for autocomplete
+var commandSuggestions = []suggestion{
+	{text: "/exit", desc: "Exit interactive mode"},
+	{text: "/quit", desc: "Exit interactive mode"},
+	{text: "/clear", desc: "Clear conversation history"},
+	{text: "/help", desc: "Show available commands"},
+	{text: "/web on", desc: "Enable auto web search"},
+	{text: "/web off", desc: "Disable auto web search"},
+	{text: "/web ", desc: "Search web for query"},
+	{text: "/model ", desc: "Show or change model"},
+}
+
+type suggestion struct {
+	text string
+	desc string
+}
+
+// Interactive mode model for bubbletea
+type interactiveModel struct {
+	textInput   textinput.Model
+	suggestions []suggestion
+	showSuggest bool
+	cursor      int
+	client      *api.AzureClient
+	messages    []api.Message
+	quitting    bool
+}
+
+func newInteractiveModel(client *api.AzureClient) interactiveModel {
+	ti := textinput.New()
+	ti.Placeholder = "Type a message or /help for commands..."
+	ti.Focus()
+	ti.CharLimit = 4096
+	ti.Width = 80
+	ti.Prompt = "> "
+	ti.PromptStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("cyan"))
+
+	return interactiveModel{
+		textInput:   ti,
+		suggestions: []suggestion{},
+		showSuggest: false,
+		cursor:      0,
+		client:      client,
+		messages: []api.Message{
+			{Role: "system", Content: "Be precise and concise."},
+		},
+		quitting: false,
+	}
+}
+
+func (m interactiveModel) Init() tea.Cmd {
+	return textinput.Blink
+}
+
+func (m interactiveModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.Type {
+		case tea.KeyCtrlC, tea.KeyEsc:
+			m.quitting = true
+			fmt.Println("\nGoodbye!")
+			return m, tea.Quit
+
+		case tea.KeyUp:
+			if m.showSuggest && len(m.suggestions) > 0 {
+				if m.cursor > 0 {
+					m.cursor--
+				}
+				return m, nil
+			}
+
+		case tea.KeyDown:
+			if m.showSuggest && len(m.suggestions) > 0 {
+				if m.cursor < len(m.suggestions)-1 {
+					m.cursor++
+				}
+				return m, nil
+			}
+
+		case tea.KeyTab:
+			if m.showSuggest && len(m.suggestions) > 0 {
+				m.textInput.SetValue(m.suggestions[m.cursor].text)
+				m.textInput.CursorEnd()
+				m.showSuggest = false
+				m.suggestions = []suggestion{}
+				return m, nil
+			}
+
+		case tea.KeyEnter:
+			if m.showSuggest && len(m.suggestions) > 0 {
+				m.textInput.SetValue(m.suggestions[m.cursor].text)
+				m.textInput.CursorEnd()
+				m.showSuggest = false
+				m.suggestions = []suggestion{}
+				return m, nil
+			}
+
+			input := strings.TrimSpace(m.textInput.Value())
+			if input == "" {
+				return m, nil
+			}
+
+			m.textInput.SetValue("")
+			m.showSuggest = false
+			m.suggestions = []suggestion{}
+
+			// Process input
+			fmt.Println()
+			if strings.HasPrefix(input, "/") {
+				if m.handleCommand(input) {
+					m.quitting = true
+					return m, tea.Quit
+				}
+			} else if cfg.WebSearch {
+				handleWebSearch(input, &m.messages, m.client)
+			} else {
+				m.messages = append(m.messages, api.Message{Role: "user", Content: input})
+				response, err := sendInteractiveMessage(m.client, m.messages)
+				if err != nil {
+					display.ShowError(err.Error())
+					m.messages = m.messages[:len(m.messages)-1]
+				} else {
+					m.messages = append(m.messages, api.Message{Role: "assistant", Content: response})
+				}
+				fmt.Println()
+			}
+
+			return m, nil
+		}
+	}
+
+	m.textInput, cmd = m.textInput.Update(msg)
+
+	// Update suggestions based on input
+	input := m.textInput.Value()
+	if strings.HasPrefix(input, "/") {
+		m.suggestions = filterSuggestions(input)
+		m.showSuggest = len(m.suggestions) > 0
+		if m.cursor >= len(m.suggestions) {
+			m.cursor = 0
+		}
+	} else {
+		m.showSuggest = false
+		m.suggestions = []suggestion{}
+	}
+
+	return m, cmd
+}
+
+func (m interactiveModel) handleCommand(input string) bool {
+	parts := strings.SplitN(input, " ", 2)
+	cmd := strings.ToLower(parts[0])
+
+	switch cmd {
+	case "/exit", "/quit", "/q":
+		fmt.Println("Goodbye!")
+		return true
+
+	case "/clear", "/c":
+		m.messages = []api.Message{
+			{Role: "system", Content: "Be precise and concise."},
+		}
+		fmt.Println("Conversation cleared.")
+		fmt.Println()
+
+	case "/help", "/h":
+		fmt.Println()
+		fmt.Println("Commands:")
+		fmt.Println("  /exit, /quit, /q  - Exit interactive mode")
+		fmt.Println("  /clear, /c        - Clear conversation history")
+		fmt.Println("  /web <query>      - Search web and ask about results")
+		fmt.Println("  /web on           - Enable auto web search for all messages")
+		fmt.Println("  /web off          - Disable auto web search")
+		fmt.Println("  /model <name>     - Switch model")
+		fmt.Println("  /model            - Show current model")
+		fmt.Println("  /help, /h         - Show this help")
+		fmt.Println()
+
+	case "/model":
+		if len(parts) > 1 {
+			newModel := strings.TrimSpace(parts[1])
+			if len(cfg.AvailableModels) > 0 && !cfg.ValidateModel(newModel) {
+				fmt.Printf("Invalid model: %s\n", newModel)
+				fmt.Printf("Available: %s\n", cfg.GetAvailableModelsString())
+			} else {
+				cfg.Model = newModel
+				fmt.Printf("Switched to model: %s\n", cfg.Model)
+			}
+		} else {
+			fmt.Printf("Current model: %s\n", cfg.Model)
+			if len(cfg.AvailableModels) > 0 {
+				fmt.Printf("Available: %s\n", cfg.GetAvailableModelsString())
+			}
+		}
+		fmt.Println()
+
+	case "/web":
+		if len(parts) < 2 {
+			status := "off"
+			if cfg.WebSearch {
+				status = "on"
+			}
+			fmt.Printf("Web search: %s\n", status)
+			fmt.Println("Usage: /web <query> | /web on | /web off")
+			fmt.Println()
+			return false
+		}
+		arg := strings.TrimSpace(parts[1])
+		switch strings.ToLower(arg) {
+		case "on":
+			cfg.WebSearch = true
+			fmt.Println("Web search enabled for all messages.")
+			fmt.Println()
+		case "off":
+			cfg.WebSearch = false
+			fmt.Println("Web search disabled.")
+			fmt.Println()
+		default:
+			handleWebSearch(arg, &m.messages, m.client)
+		}
+
+	default:
+		fmt.Printf("Unknown command: %s\n", cmd)
+		fmt.Println("Type /help for available commands")
+		fmt.Println()
+	}
+
+	return false
+}
+
+func (m interactiveModel) View() string {
+	if m.quitting {
+		return ""
+	}
+
+	var s strings.Builder
+	s.WriteString(m.textInput.View())
+	s.WriteString("\n")
+
+	if m.showSuggest && len(m.suggestions) > 0 {
+		selectedStyle := lipgloss.NewStyle().Background(lipgloss.Color("62")).Foreground(lipgloss.Color("230"))
+		normalStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+		descStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+
+		for i, sug := range m.suggestions {
+			if i == m.cursor {
+				s.WriteString(selectedStyle.Render(fmt.Sprintf(" %s ", sug.text)))
+				s.WriteString(descStyle.Render(fmt.Sprintf(" %s", sug.desc)))
+			} else {
+				s.WriteString(normalStyle.Render(fmt.Sprintf(" %s ", sug.text)))
+				s.WriteString(descStyle.Render(fmt.Sprintf(" %s", sug.desc)))
+			}
+			s.WriteString("\n")
+		}
+	}
+
+	return s.String()
+}
+
+func filterSuggestions(input string) []suggestion {
+	var matches []suggestion
+	input = strings.ToLower(input)
+	for _, s := range commandSuggestions {
+		if strings.HasPrefix(strings.ToLower(s.text), input) {
+			matches = append(matches, s)
+		}
+	}
+	return matches
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "azure-ai [query]",
@@ -152,176 +421,18 @@ func runInteractive() {
 	if cfg.WebSearch {
 		fmt.Println("Web search: enabled (every message will search the web)")
 	}
-	fmt.Println("Type /help for commands, /exit to quit, Tab for autocomplete")
+	fmt.Println("Type /help for commands, Ctrl+C to quit")
+	fmt.Println("Use Up/Down arrows to navigate suggestions, Enter/Tab to select")
 	fmt.Println()
 
-	interactiveClient = api.NewAzureClient(cfg)
-	interactiveMessages = []api.Message{
-		{Role: "system", Content: "Be precise and concise."},
-	}
-	exitInteractive = false
+	client := api.NewAzureClient(cfg)
+	model := newInteractiveModel(client)
 
-	p := prompt.New(
-		interactiveExecutor,
-		interactiveCompleter,
-		prompt.OptionPrefix("> "),
-		prompt.OptionTitle("Azure AI CLI"),
-		prompt.OptionPrefixTextColor(prompt.Cyan),
-		prompt.OptionPreviewSuggestionTextColor(prompt.DarkGray),
-		prompt.OptionSelectedSuggestionBGColor(prompt.DarkBlue),
-		prompt.OptionSuggestionBGColor(prompt.DarkGray),
-	)
-
-	for !exitInteractive {
-		input := p.Input()
-		if exitInteractive {
-			break
-		}
-		if input == "" {
-			continue
-		}
-	}
-}
-
-func interactiveCompleter(d prompt.Document) []prompt.Suggest {
-	text := d.TextBeforeCursor()
-
-	// Only show suggestions when typing commands starting with /
-	if !strings.HasPrefix(text, "/") {
-		return nil
-	}
-
-	suggestions := []prompt.Suggest{
-		{Text: "/exit", Description: "Exit interactive mode"},
-		{Text: "/quit", Description: "Exit interactive mode"},
-		{Text: "/clear", Description: "Clear conversation history"},
-		{Text: "/help", Description: "Show available commands"},
-		{Text: "/web ", Description: "Search web: /web <query>, /web on, /web off"},
-		{Text: "/model ", Description: "Show or change model"},
-	}
-
-	return prompt.FilterHasPrefix(suggestions, text, true)
-}
-
-func interactiveExecutor(input string) {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return
-	}
-
-	// Handle commands
-	if strings.HasPrefix(input, "/") {
-		if handleCommand(input, &interactiveMessages, interactiveClient) {
-			exitInteractive = true
-			return
-		}
-		return
-	}
-
-	// Web search mode: automatically search for every message
-	if cfg.WebSearch {
-		handleWebSearch(input, &interactiveMessages, interactiveClient)
-		return
-	}
-
-	// Add user message to history
-	interactiveMessages = append(interactiveMessages, api.Message{Role: "user", Content: input})
-
-	// Send request
-	fmt.Println()
-	response, err := sendInteractiveMessage(interactiveClient, interactiveMessages)
-	if err != nil {
+	p := tea.NewProgram(model)
+	if _, err := p.Run(); err != nil {
 		display.ShowError(err.Error())
-		// Remove the failed user message
-		interactiveMessages = interactiveMessages[:len(interactiveMessages)-1]
-		return
+		os.Exit(1)
 	}
-
-	// Add assistant response to history
-	interactiveMessages = append(interactiveMessages, api.Message{Role: "assistant", Content: response})
-	fmt.Println()
-}
-
-func handleCommand(input string, messages *[]api.Message, client *api.AzureClient) bool {
-	parts := strings.SplitN(input, " ", 2)
-	cmd := strings.ToLower(parts[0])
-
-	switch cmd {
-	case "/exit", "/quit", "/q":
-		fmt.Println("Goodbye!")
-		return true
-
-	case "/clear", "/c":
-		*messages = []api.Message{
-			{Role: "system", Content: "Be precise and concise."},
-		}
-		fmt.Println("Conversation cleared.")
-		fmt.Println()
-
-	case "/help", "/h":
-		fmt.Println()
-		fmt.Println("Commands:")
-		fmt.Println("  /exit, /quit, /q  - Exit interactive mode")
-		fmt.Println("  /clear, /c        - Clear conversation history")
-		fmt.Println("  /web <query>      - Search web and ask about results")
-		fmt.Println("  /web on           - Enable auto web search for all messages")
-		fmt.Println("  /web off          - Disable auto web search")
-		fmt.Println("  /model <name>     - Switch model")
-		fmt.Println("  /model            - Show current model")
-		fmt.Println("  /help, /h         - Show this help")
-		fmt.Println()
-
-	case "/model":
-		if len(parts) > 1 {
-			newModel := strings.TrimSpace(parts[1])
-			if len(cfg.AvailableModels) > 0 && !cfg.ValidateModel(newModel) {
-				fmt.Printf("Invalid model: %s\n", newModel)
-				fmt.Printf("Available: %s\n", cfg.GetAvailableModelsString())
-			} else {
-				cfg.Model = newModel
-				fmt.Printf("Switched to model: %s\n", cfg.Model)
-			}
-		} else {
-			fmt.Printf("Current model: %s\n", cfg.Model)
-			if len(cfg.AvailableModels) > 0 {
-				fmt.Printf("Available: %s\n", cfg.GetAvailableModelsString())
-			}
-		}
-		fmt.Println()
-
-	case "/web":
-		if len(parts) < 2 {
-			status := "off"
-			if cfg.WebSearch {
-				status = "on"
-			}
-			fmt.Printf("Web search: %s\n", status)
-			fmt.Println("Usage: /web <query> | /web on | /web off")
-			fmt.Println()
-			return false
-		}
-		arg := strings.TrimSpace(parts[1])
-		switch strings.ToLower(arg) {
-		case "on":
-			cfg.WebSearch = true
-			fmt.Println("Web search enabled for all messages.")
-			fmt.Println()
-		case "off":
-			cfg.WebSearch = false
-			fmt.Println("Web search disabled.")
-			fmt.Println()
-		default:
-			// It's a search query
-			handleWebSearch(arg, messages, client)
-		}
-
-	default:
-		fmt.Printf("Unknown command: %s\n", cmd)
-		fmt.Println("Type /help for available commands")
-		fmt.Println()
-	}
-
-	return false
 }
 
 func handleWebSearch(query string, messages *[]api.Message, client *api.AzureClient) {
