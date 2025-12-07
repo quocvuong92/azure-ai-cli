@@ -298,28 +298,31 @@ func handleWebSearch(query string, messages *[]api.Message, client *api.AzureCli
 		return
 	}
 
-	// Build prompt with search context
-	webPrompt := fmt.Sprintf(`Use the following web search results to answer the question.
-Cite sources using [1], [2], etc.
+	// Add web search results as a system context message, then add user query
+	// This preserves conversation flow while providing web context
+	webContextMsg := api.Message{
+		Role: "system",
+		Content: fmt.Sprintf(`Web search results for additional context (cite using [1], [2], etc. if relevant):
 
-Web Search Results:
-%s
+%s`, searchContext),
+	}
 
-Question: %s`, searchContext, query)
-
-	// Add as user message
-	*messages = append(*messages, api.Message{Role: "user", Content: webPrompt})
+	// Build messages: existing history + web context + user question
+	messagesWithWeb := make([]api.Message, len(*messages))
+	copy(messagesWithWeb, *messages)
+	messagesWithWeb = append(messagesWithWeb, webContextMsg)
+	messagesWithWeb = append(messagesWithWeb, api.Message{Role: "user", Content: query})
 
 	// Send request
 	fmt.Println()
-	response, err := sendInteractiveMessage(client, *messages)
+	response, err := sendInteractiveMessage(client, messagesWithWeb)
 	if err != nil {
 		display.ShowError(err.Error())
-		*messages = (*messages)[:len(*messages)-1]
 		return
 	}
 
-	// Add response to history
+	// Add only the user message and response to history (not the web context)
+	*messages = append(*messages, api.Message{Role: "user", Content: query})
 	*messages = append(*messages, api.Message{Role: "assistant", Content: response})
 
 	// Show citations if enabled
