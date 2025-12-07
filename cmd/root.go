@@ -1,13 +1,13 @@
 package cmd
 
 import (
-	"bufio"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"strings"
 
+	"github.com/c-bata/go-prompt"
 	"github.com/spf13/cobra"
 
 	"github.com/quocvuong92/azure-ai-cli/internal/api"
@@ -20,6 +20,11 @@ var (
 	verbose       bool
 	listModels    bool
 	searchResults *api.TavilyResponse // Store search results for citations
+
+	// Interactive mode state
+	interactiveClient   *api.AzureClient
+	interactiveMessages []api.Message
+	exitInteractive     bool
 )
 
 var rootCmd = &cobra.Command{
@@ -147,65 +152,94 @@ func runInteractive() {
 	if cfg.WebSearch {
 		fmt.Println("Web search: enabled (every message will search the web)")
 	}
-	fmt.Println("Type /help for commands, /exit to quit")
+	fmt.Println("Type /help for commands, /exit to quit, Tab for autocomplete")
 	fmt.Println()
 
-	azureClient := api.NewAzureClient(cfg)
-	reader := bufio.NewReader(os.Stdin)
-
-	// Conversation history
-	messages := []api.Message{
+	interactiveClient = api.NewAzureClient(cfg)
+	interactiveMessages = []api.Message{
 		{Role: "system", Content: "Be precise and concise."},
 	}
+	exitInteractive = false
 
-	for {
-		fmt.Print("> ")
-		input, err := reader.ReadString('\n')
-		if err != nil {
-			if err == io.EOF {
-				fmt.Println("\nGoodbye!")
-				return
-			}
-			display.ShowError(err.Error())
-			continue
+	p := prompt.New(
+		interactiveExecutor,
+		interactiveCompleter,
+		prompt.OptionPrefix("> "),
+		prompt.OptionTitle("Azure AI CLI"),
+		prompt.OptionPrefixTextColor(prompt.Cyan),
+		prompt.OptionPreviewSuggestionTextColor(prompt.DarkGray),
+		prompt.OptionSelectedSuggestionBGColor(prompt.DarkBlue),
+		prompt.OptionSuggestionBGColor(prompt.DarkGray),
+	)
+
+	for !exitInteractive {
+		input := p.Input()
+		if exitInteractive {
+			break
 		}
-
-		input = strings.TrimSpace(input)
 		if input == "" {
 			continue
 		}
-
-		// Handle commands
-		if strings.HasPrefix(input, "/") {
-			if handleCommand(input, &messages, azureClient) {
-				return // exit command
-			}
-			continue
-		}
-
-		// Web search mode: automatically search for every message
-		if cfg.WebSearch {
-			handleWebSearch(input, &messages, azureClient)
-			continue
-		}
-
-		// Add user message to history
-		messages = append(messages, api.Message{Role: "user", Content: input})
-
-		// Send request
-		fmt.Println()
-		response, err := sendInteractiveMessage(azureClient, messages)
-		if err != nil {
-			display.ShowError(err.Error())
-			// Remove the failed user message
-			messages = messages[:len(messages)-1]
-			continue
-		}
-
-		// Add assistant response to history
-		messages = append(messages, api.Message{Role: "assistant", Content: response})
-		fmt.Println()
 	}
+}
+
+func interactiveCompleter(d prompt.Document) []prompt.Suggest {
+	text := d.TextBeforeCursor()
+
+	// Only show suggestions when typing commands starting with /
+	if !strings.HasPrefix(text, "/") {
+		return nil
+	}
+
+	suggestions := []prompt.Suggest{
+		{Text: "/exit", Description: "Exit interactive mode"},
+		{Text: "/quit", Description: "Exit interactive mode"},
+		{Text: "/clear", Description: "Clear conversation history"},
+		{Text: "/help", Description: "Show available commands"},
+		{Text: "/web ", Description: "Search web: /web <query>, /web on, /web off"},
+		{Text: "/model ", Description: "Show or change model"},
+	}
+
+	return prompt.FilterHasPrefix(suggestions, text, true)
+}
+
+func interactiveExecutor(input string) {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return
+	}
+
+	// Handle commands
+	if strings.HasPrefix(input, "/") {
+		if handleCommand(input, &interactiveMessages, interactiveClient) {
+			exitInteractive = true
+			return
+		}
+		return
+	}
+
+	// Web search mode: automatically search for every message
+	if cfg.WebSearch {
+		handleWebSearch(input, &interactiveMessages, interactiveClient)
+		return
+	}
+
+	// Add user message to history
+	interactiveMessages = append(interactiveMessages, api.Message{Role: "user", Content: input})
+
+	// Send request
+	fmt.Println()
+	response, err := sendInteractiveMessage(interactiveClient, interactiveMessages)
+	if err != nil {
+		display.ShowError(err.Error())
+		// Remove the failed user message
+		interactiveMessages = interactiveMessages[:len(interactiveMessages)-1]
+		return
+	}
+
+	// Add assistant response to history
+	interactiveMessages = append(interactiveMessages, api.Message{Role: "assistant", Content: response})
+	fmt.Println()
 }
 
 func handleCommand(input string, messages *[]api.Message, client *api.AzureClient) bool {
