@@ -36,8 +36,79 @@ var (
 	ErrInvalidSearchProvider = errors.New("invalid search provider. Use 'tavily', 'linkup', or 'brave'")
 )
 
-// Error codes that should trigger key rotation (for Tavily)
+// Error codes that should trigger key rotation
 var RotatableErrorCodes = []int{401, 403, 429}
+
+// KeyRotator manages a pool of API keys with rotation support
+type KeyRotator struct {
+	keys       []string
+	currentIdx int
+	currentKey string
+}
+
+// NewKeyRotator creates a new KeyRotator from an environment variable
+func NewKeyRotator(envVar string) *KeyRotator {
+	keys := getKeysFromEnv(envVar)
+	kr := &KeyRotator{
+		keys:       keys,
+		currentIdx: 0,
+	}
+	if len(keys) > 0 {
+		kr.currentKey = keys[0]
+	}
+	return kr
+}
+
+// GetCurrentKey returns the current active API key
+func (kr *KeyRotator) GetCurrentKey() string {
+	return kr.currentKey
+}
+
+// GetKeyCount returns the total number of keys
+func (kr *KeyRotator) GetKeyCount() int {
+	return len(kr.keys)
+}
+
+// GetCurrentIndex returns the current key index (0-based)
+func (kr *KeyRotator) GetCurrentIndex() int {
+	return kr.currentIdx
+}
+
+// HasKeys returns true if there are any keys configured
+func (kr *KeyRotator) HasKeys() bool {
+	return len(kr.keys) > 0
+}
+
+// Rotate moves to the next available API key
+func (kr *KeyRotator) Rotate() (string, error) {
+	if len(kr.keys) <= 1 {
+		return "", ErrNoAvailableKeys
+	}
+	nextIndex := kr.currentIdx + 1
+	if nextIndex >= len(kr.keys) {
+		return "", ErrNoAvailableKeys
+	}
+	kr.currentIdx = nextIndex
+	kr.currentKey = kr.keys[nextIndex]
+	return kr.currentKey, nil
+}
+
+// getKeysFromEnv retrieves API keys from an environment variable (comma-separated)
+func getKeysFromEnv(envVar string) []string {
+	keysEnv := os.Getenv(envVar)
+	if keysEnv == "" {
+		return nil
+	}
+	keys := strings.Split(keysEnv, ",")
+	var result []string
+	for _, key := range keys {
+		key = strings.TrimSpace(key)
+		if key != "" {
+			result = append(result, key)
+		}
+	}
+	return result
+}
 
 // Config holds the application configuration
 type Config struct {
@@ -47,20 +118,21 @@ type Config struct {
 	Model           string
 	AvailableModels []string
 
-	// Tavily (multiple keys for free tier rotation)
+	// Key rotators for search providers
+	TavilyKeys *KeyRotator
+	LinkupKeys *KeyRotator
+	BraveKeys  *KeyRotator
+
+	// Legacy fields for backward compatibility (used by API clients)
 	TavilyAPIKey        string
 	TavilyAPIKeys       []string
 	TavilyCurrentKeyIdx int
-
-	// Linkup (multiple keys for free tier rotation)
 	LinkupAPIKey        string
 	LinkupAPIKeys       []string
 	LinkupCurrentKeyIdx int
-
-	// Brave (multiple keys for free tier rotation)
-	BraveAPIKey        string
-	BraveAPIKeys       []string
-	BraveCurrentKeyIdx int
+	BraveAPIKey         string
+	BraveAPIKeys        []string
+	BraveCurrentKeyIdx  int
 
 	// Web search provider selection
 	WebSearchProvider string // "tavily", "linkup", or "brave"
@@ -123,26 +195,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("%w: %s. Available: %s", ErrInvalidModel, c.Model, c.GetAvailableModelsString())
 	}
 
-	// Load Tavily keys (optional, only required if --web is used with tavily provider)
-	c.TavilyAPIKeys = getTavilyKeysFromEnv()
-	if len(c.TavilyAPIKeys) > 0 {
-		c.TavilyCurrentKeyIdx = 0
-		c.TavilyAPIKey = c.TavilyAPIKeys[0]
-	}
+	// Initialize key rotators
+	c.TavilyKeys = NewKeyRotator(EnvTavilyAPIKeys)
+	c.LinkupKeys = NewKeyRotator(EnvLinkupAPIKeys)
+	c.BraveKeys = NewKeyRotator(EnvBraveAPIKeys)
 
-	// Load Linkup keys (optional, only required if --web is used with linkup provider)
-	c.LinkupAPIKeys = getLinkupKeysFromEnv()
-	if len(c.LinkupAPIKeys) > 0 {
-		c.LinkupCurrentKeyIdx = 0
-		c.LinkupAPIKey = c.LinkupAPIKeys[0]
-	}
-
-	// Load Brave keys (optional, only required if --web is used with brave provider)
-	c.BraveAPIKeys = getBraveKeysFromEnv()
-	if len(c.BraveAPIKeys) > 0 {
-		c.BraveCurrentKeyIdx = 0
-		c.BraveAPIKey = c.BraveAPIKeys[0]
-	}
+	// Sync legacy fields for backward compatibility
+	c.syncLegacyFields()
 
 	// Set web search provider (default to tavily, or auto-detect based on available keys)
 	if c.WebSearchProvider == "" {
@@ -150,11 +209,11 @@ func (c *Config) Validate() error {
 	}
 	if c.WebSearchProvider == "" {
 		// Auto-detect: prefer tavily if available, then linkup, then brave
-		if len(c.TavilyAPIKeys) > 0 {
+		if c.TavilyKeys.HasKeys() {
 			c.WebSearchProvider = "tavily"
-		} else if len(c.LinkupAPIKeys) > 0 {
+		} else if c.LinkupKeys.HasKeys() {
 			c.WebSearchProvider = "linkup"
-		} else if len(c.BraveAPIKeys) > 0 {
+		} else if c.BraveKeys.HasKeys() {
 			c.WebSearchProvider = "brave"
 		} else {
 			c.WebSearchProvider = DefaultSearchProvider
@@ -168,18 +227,36 @@ func (c *Config) Validate() error {
 
 	// Validate web search keys if web search is requested
 	if c.WebSearch {
-		if c.WebSearchProvider == "tavily" && len(c.TavilyAPIKeys) == 0 {
+		if c.WebSearchProvider == "tavily" && !c.TavilyKeys.HasKeys() {
 			return ErrWebSearchKeyNotFound
 		}
-		if c.WebSearchProvider == "linkup" && len(c.LinkupAPIKeys) == 0 {
+		if c.WebSearchProvider == "linkup" && !c.LinkupKeys.HasKeys() {
 			return ErrWebSearchKeyNotFound
 		}
-		if c.WebSearchProvider == "brave" && len(c.BraveAPIKeys) == 0 {
+		if c.WebSearchProvider == "brave" && !c.BraveKeys.HasKeys() {
 			return ErrWebSearchKeyNotFound
 		}
 	}
 
 	return nil
+}
+
+// syncLegacyFields synchronizes KeyRotator state to legacy fields for backward compatibility
+func (c *Config) syncLegacyFields() {
+	// Tavily
+	c.TavilyAPIKey = c.TavilyKeys.GetCurrentKey()
+	c.TavilyAPIKeys = c.TavilyKeys.keys
+	c.TavilyCurrentKeyIdx = c.TavilyKeys.GetCurrentIndex()
+
+	// Linkup
+	c.LinkupAPIKey = c.LinkupKeys.GetCurrentKey()
+	c.LinkupAPIKeys = c.LinkupKeys.keys
+	c.LinkupCurrentKeyIdx = c.LinkupKeys.GetCurrentIndex()
+
+	// Brave
+	c.BraveAPIKey = c.BraveKeys.GetCurrentKey()
+	c.BraveAPIKeys = c.BraveKeys.keys
+	c.BraveCurrentKeyIdx = c.BraveKeys.GetCurrentIndex()
 }
 
 // GetAzureAPIURL builds the full API URL for chat completions
@@ -211,105 +288,48 @@ func (c *Config) GetAvailableModelsString() string {
 
 // RotateTavilyKey moves to the next available Tavily API key
 func (c *Config) RotateTavilyKey() (string, error) {
-	if len(c.TavilyAPIKeys) <= 1 {
-		return "", ErrNoAvailableKeys
+	key, err := c.TavilyKeys.Rotate()
+	if err != nil {
+		return "", err
 	}
-	nextIndex := c.TavilyCurrentKeyIdx + 1
-	if nextIndex >= len(c.TavilyAPIKeys) {
-		return "", ErrNoAvailableKeys
-	}
-	c.TavilyCurrentKeyIdx = nextIndex
-	c.TavilyAPIKey = c.TavilyAPIKeys[nextIndex]
-	return c.TavilyAPIKey, nil
+	c.TavilyAPIKey = key
+	c.TavilyCurrentKeyIdx = c.TavilyKeys.GetCurrentIndex()
+	return key, nil
 }
 
 // GetTavilyKeyCount returns the total number of Tavily keys
 func (c *Config) GetTavilyKeyCount() int {
-	return len(c.TavilyAPIKeys)
-}
-
-// getTavilyKeysFromEnv retrieves Tavily API keys from environment variable
-func getTavilyKeysFromEnv() []string {
-	if keysEnv := os.Getenv(EnvTavilyAPIKeys); keysEnv != "" {
-		keys := strings.Split(keysEnv, ",")
-		var result []string
-		for _, key := range keys {
-			key = strings.TrimSpace(key)
-			if key != "" {
-				result = append(result, key)
-			}
-		}
-		return result
-	}
-	return nil
+	return c.TavilyKeys.GetKeyCount()
 }
 
 // RotateLinkupKey moves to the next available Linkup API key
 func (c *Config) RotateLinkupKey() (string, error) {
-	if len(c.LinkupAPIKeys) <= 1 {
-		return "", ErrNoAvailableKeys
+	key, err := c.LinkupKeys.Rotate()
+	if err != nil {
+		return "", err
 	}
-	nextIndex := c.LinkupCurrentKeyIdx + 1
-	if nextIndex >= len(c.LinkupAPIKeys) {
-		return "", ErrNoAvailableKeys
-	}
-	c.LinkupCurrentKeyIdx = nextIndex
-	c.LinkupAPIKey = c.LinkupAPIKeys[nextIndex]
-	return c.LinkupAPIKey, nil
+	c.LinkupAPIKey = key
+	c.LinkupCurrentKeyIdx = c.LinkupKeys.GetCurrentIndex()
+	return key, nil
 }
 
 // GetLinkupKeyCount returns the total number of Linkup keys
 func (c *Config) GetLinkupKeyCount() int {
-	return len(c.LinkupAPIKeys)
-}
-
-// getLinkupKeysFromEnv retrieves Linkup API keys from environment variable
-func getLinkupKeysFromEnv() []string {
-	if keysEnv := os.Getenv(EnvLinkupAPIKeys); keysEnv != "" {
-		keys := strings.Split(keysEnv, ",")
-		var result []string
-		for _, key := range keys {
-			key = strings.TrimSpace(key)
-			if key != "" {
-				result = append(result, key)
-			}
-		}
-		return result
-	}
-	return nil
+	return c.LinkupKeys.GetKeyCount()
 }
 
 // RotateBraveKey moves to the next available Brave API key
 func (c *Config) RotateBraveKey() (string, error) {
-	if len(c.BraveAPIKeys) <= 1 {
-		return "", ErrNoAvailableKeys
+	key, err := c.BraveKeys.Rotate()
+	if err != nil {
+		return "", err
 	}
-	nextIndex := c.BraveCurrentKeyIdx + 1
-	if nextIndex >= len(c.BraveAPIKeys) {
-		return "", ErrNoAvailableKeys
-	}
-	c.BraveCurrentKeyIdx = nextIndex
-	c.BraveAPIKey = c.BraveAPIKeys[nextIndex]
-	return c.BraveAPIKey, nil
+	c.BraveAPIKey = key
+	c.BraveCurrentKeyIdx = c.BraveKeys.GetCurrentIndex()
+	return key, nil
 }
 
 // GetBraveKeyCount returns the total number of Brave keys
 func (c *Config) GetBraveKeyCount() int {
-	return len(c.BraveAPIKeys)
-}
-
-// getBraveKeysFromEnv retrieves Brave API keys from environment variable
-func getBraveKeysFromEnv() []string {
-	if keysEnv := os.Getenv(EnvBraveAPIKeys); keysEnv != "" {
-		keys := strings.Split(keysEnv, ",")
-		var result []string
-		for _, key := range keys {
-			key = strings.TrimSpace(key)
-			if key != "" {
-				result = append(result, key)
-			}
-		}
-		return result
-	}
-	return nil
+	return c.BraveKeys.GetKeyCount()
 }

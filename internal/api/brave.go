@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -34,8 +35,11 @@ type BraveResult struct {
 type BraveClient struct {
 	httpClient    *http.Client
 	config        *config.Config
-	onKeyRotation func(fromIndex, toIndex, totalKeys int)
+	onKeyRotation KeyRotationCallback
 }
+
+// Ensure BraveClient implements SearchClient
+var _ SearchClient = (*BraveClient)(nil)
 
 // NewBraveClient creates a new Brave Search client
 func NewBraveClient(cfg *config.Config) *BraveClient {
@@ -52,36 +56,63 @@ func (c *BraveClient) SetKeyRotationCallback(callback func(fromIndex, toIndex, t
 	c.onKeyRotation = callback
 }
 
-// Search performs a web search using Brave Search
-func (c *BraveClient) Search(query string) (*BraveResponse, error) {
-	return c.searchWithRetry(query)
+// Search performs a web search using Brave Search (implements SearchClient interface)
+func (c *BraveClient) Search(ctx context.Context, query string) (*SearchResponse, error) {
+	resp, err := c.searchWithRetry(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return resp.ToSearchResponse(), nil
+}
+
+// SearchLegacy performs a web search using Brave Search (legacy method for backward compatibility)
+func (c *BraveClient) SearchLegacy(query string) (*BraveResponse, error) {
+	return c.searchWithRetry(context.Background(), query)
 }
 
 // searchWithRetry performs search with automatic key rotation on failure
-func (c *BraveClient) searchWithRetry(query string) (*BraveResponse, error) {
+func (c *BraveClient) searchWithRetry(ctx context.Context, query string) (*BraveResponse, error) {
 	if c.config.GetBraveKeyCount() <= 1 {
-		return c.doSearch(query)
+		return c.doSearch(ctx, query)
 	}
 
-	for {
-		resp, err := c.doSearch(query)
+	var lastErr error
+	for attempt := 0; attempt < MaxRetryAttempts; attempt++ {
+		// Check for context cancellation
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("search cancelled: %w", err)
+		}
+
+		resp, err := c.doSearch(ctx, query)
 		if err == nil {
 			return resp, nil
 		}
+		lastErr = err
 
 		apiErr, ok := err.(*APIError)
-		if !ok || !c.shouldRotateKey(apiErr.StatusCode) {
+		if !ok || !ShouldRotateKey(apiErr.StatusCode) {
 			return nil, err
 		}
 
 		if rotateErr := c.rotateKey(); rotateErr != nil {
 			return nil, fmt.Errorf("%v (no more Brave API keys available)", err)
 		}
+
+		// Apply backoff before retry
+		if attempt < MaxRetryAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("search cancelled: %w", ctx.Err())
+			case <-time.After(CalculateBackoff(attempt)):
+			}
+		}
 	}
+
+	return nil, fmt.Errorf("max retry attempts (%d) exceeded: %v", MaxRetryAttempts, lastErr)
 }
 
 // doSearch performs a single search attempt
-func (c *BraveClient) doSearch(query string) (*BraveResponse, error) {
+func (c *BraveClient) doSearch(ctx context.Context, query string) (*BraveResponse, error) {
 	// Build URL with query parameters
 	reqURL, err := url.Parse(BraveAPIURL)
 	if err != nil {
@@ -93,7 +124,7 @@ func (c *BraveClient) doSearch(query string) (*BraveResponse, error) {
 	params.Set("count", "5")
 	reqURL.RawQuery = params.Encode()
 
-	req, err := http.NewRequest(http.MethodGet, reqURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL.String(), nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -127,16 +158,6 @@ func (c *BraveClient) doSearch(query string) (*BraveResponse, error) {
 	return &braveResp, nil
 }
 
-// shouldRotateKey checks if the error indicates we should try another key
-func (c *BraveClient) shouldRotateKey(statusCode int) bool {
-	for _, code := range config.RotatableErrorCodes {
-		if statusCode == code {
-			return true
-		}
-	}
-	return false
-}
-
 // rotateKey attempts to switch to the next available API key
 func (c *BraveClient) rotateKey() error {
 	oldIndex := c.config.BraveCurrentKeyIdx
@@ -150,6 +171,21 @@ func (c *BraveClient) rotateKey() error {
 	}
 
 	return nil
+}
+
+// ToSearchResponse converts BraveResponse to unified SearchResponse
+func (r *BraveResponse) ToSearchResponse() *SearchResponse {
+	results := make([]SearchResult, len(r.Web.Results))
+	for i, res := range r.Web.Results {
+		results[i] = SearchResult{
+			Title:   res.Title,
+			URL:     res.URL,
+			Content: res.Description,
+		}
+	}
+	return &SearchResponse{
+		Results: results,
+	}
 }
 
 // FormatResultsAsContext formats search results for use as LLM context

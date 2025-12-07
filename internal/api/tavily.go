@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -44,8 +45,11 @@ type TavilyErrorResponse struct {
 type TavilyClient struct {
 	httpClient    *http.Client
 	config        *config.Config
-	onKeyRotation func(fromIndex, toIndex, totalKeys int)
+	onKeyRotation KeyRotationCallback
 }
+
+// Ensure TavilyClient implements SearchClient
+var _ SearchClient = (*TavilyClient)(nil)
 
 // NewTavilyClient creates a new Tavily client
 func NewTavilyClient(cfg *config.Config) *TavilyClient {
@@ -62,36 +66,63 @@ func (c *TavilyClient) SetKeyRotationCallback(callback func(fromIndex, toIndex, 
 	c.onKeyRotation = callback
 }
 
-// Search performs a web search using Tavily
-func (c *TavilyClient) Search(query string) (*TavilyResponse, error) {
-	return c.searchWithRetry(query)
+// Search performs a web search using Tavily (implements SearchClient interface)
+func (c *TavilyClient) Search(ctx context.Context, query string) (*SearchResponse, error) {
+	resp, err := c.searchWithRetry(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return resp.ToSearchResponse(), nil
+}
+
+// SearchLegacy performs a web search using Tavily (legacy method for backward compatibility)
+func (c *TavilyClient) SearchLegacy(query string) (*TavilyResponse, error) {
+	return c.searchWithRetry(context.Background(), query)
 }
 
 // searchWithRetry performs search with automatic key rotation on failure
-func (c *TavilyClient) searchWithRetry(query string) (*TavilyResponse, error) {
+func (c *TavilyClient) searchWithRetry(ctx context.Context, query string) (*TavilyResponse, error) {
 	if c.config.GetTavilyKeyCount() <= 1 {
-		return c.doSearch(query)
+		return c.doSearch(ctx, query)
 	}
 
-	for {
-		resp, err := c.doSearch(query)
+	var lastErr error
+	for attempt := 0; attempt < MaxRetryAttempts; attempt++ {
+		// Check for context cancellation
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("search cancelled: %w", err)
+		}
+
+		resp, err := c.doSearch(ctx, query)
 		if err == nil {
 			return resp, nil
 		}
+		lastErr = err
 
 		apiErr, ok := err.(*APIError)
-		if !ok || !c.shouldRotateKey(apiErr.StatusCode) {
+		if !ok || !ShouldRotateKey(apiErr.StatusCode) {
 			return nil, err
 		}
 
 		if rotateErr := c.rotateKey(); rotateErr != nil {
 			return nil, fmt.Errorf("%v (no more Tavily API keys available)", err)
 		}
+
+		// Apply backoff before retry
+		if attempt < MaxRetryAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return nil, fmt.Errorf("search cancelled: %w", ctx.Err())
+			case <-time.After(CalculateBackoff(attempt)):
+			}
+		}
 	}
+
+	return nil, fmt.Errorf("max retry attempts (%d) exceeded: %v", MaxRetryAttempts, lastErr)
 }
 
 // doSearch performs a single search attempt
-func (c *TavilyClient) doSearch(query string) (*TavilyResponse, error) {
+func (c *TavilyClient) doSearch(ctx context.Context, query string) (*TavilyResponse, error) {
 	reqBody := TavilyRequest{
 		APIKey:      c.config.TavilyAPIKey,
 		Query:       query,
@@ -104,7 +135,7 @@ func (c *TavilyClient) doSearch(query string) (*TavilyResponse, error) {
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, TavilyAPIURL, bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, TavilyAPIURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -142,16 +173,6 @@ func (c *TavilyClient) doSearch(query string) (*TavilyResponse, error) {
 	return &tavilyResp, nil
 }
 
-// shouldRotateKey checks if the error indicates we should try another key
-func (c *TavilyClient) shouldRotateKey(statusCode int) bool {
-	for _, code := range config.RotatableErrorCodes {
-		if statusCode == code {
-			return true
-		}
-	}
-	return false
-}
-
 // rotateKey attempts to switch to the next available API key
 func (c *TavilyClient) rotateKey() error {
 	oldIndex := c.config.TavilyCurrentKeyIdx
@@ -165,6 +186,23 @@ func (c *TavilyClient) rotateKey() error {
 	}
 
 	return nil
+}
+
+// ToSearchResponse converts TavilyResponse to unified SearchResponse
+func (r *TavilyResponse) ToSearchResponse() *SearchResponse {
+	results := make([]SearchResult, len(r.Results))
+	for i, res := range r.Results {
+		results[i] = SearchResult{
+			Title:   res.Title,
+			URL:     res.URL,
+			Content: res.Content,
+			Score:   res.Score,
+		}
+	}
+	return &SearchResponse{
+		Results: results,
+		Answer:  r.Answer,
+	}
 }
 
 // FormatResultsAsContext formats search results for use as LLM context

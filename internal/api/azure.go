@@ -3,9 +3,11 @@ package api
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -90,15 +92,25 @@ func NewAzureClient(cfg *config.Config) *AzureClient {
 
 // Query sends a query to Azure OpenAI (non-streaming)
 func (c *AzureClient) Query(systemPrompt, userMessage string) (*ChatResponse, error) {
+	return c.QueryWithContext(context.Background(), systemPrompt, userMessage)
+}
+
+// QueryWithContext sends a query to Azure OpenAI with context support (non-streaming)
+func (c *AzureClient) QueryWithContext(ctx context.Context, systemPrompt, userMessage string) (*ChatResponse, error) {
 	messages := []Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userMessage},
 	}
-	return c.QueryWithHistory(messages)
+	return c.QueryWithHistoryContext(ctx, messages)
 }
 
 // QueryWithHistory sends a query with full message history (non-streaming)
 func (c *AzureClient) QueryWithHistory(messages []Message) (*ChatResponse, error) {
+	return c.QueryWithHistoryContext(context.Background(), messages)
+}
+
+// QueryWithHistoryContext sends a query with full message history and context support (non-streaming)
+func (c *AzureClient) QueryWithHistoryContext(ctx context.Context, messages []Message) (*ChatResponse, error) {
 	reqBody := ChatRequest{
 		Model:    c.config.Model,
 		Messages: messages,
@@ -110,7 +122,7 @@ func (c *AzureClient) QueryWithHistory(messages []Message) (*ChatResponse, error
 		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.config.GetAzureAPIURL(), bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.GetAzureAPIURL(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -151,15 +163,25 @@ func (c *AzureClient) QueryWithHistory(messages []Message) (*ChatResponse, error
 
 // QueryStream sends a streaming query to Azure OpenAI
 func (c *AzureClient) QueryStream(systemPrompt, userMessage string, onChunk func(content string), onDone func(resp *ChatResponse)) error {
+	return c.QueryStreamWithContext(context.Background(), systemPrompt, userMessage, onChunk, onDone)
+}
+
+// QueryStreamWithContext sends a streaming query to Azure OpenAI with context support
+func (c *AzureClient) QueryStreamWithContext(ctx context.Context, systemPrompt, userMessage string, onChunk func(content string), onDone func(resp *ChatResponse)) error {
 	messages := []Message{
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userMessage},
 	}
-	return c.QueryStreamWithHistory(messages, onChunk, onDone)
+	return c.QueryStreamWithHistoryContext(ctx, messages, onChunk, onDone)
 }
 
 // QueryStreamWithHistory sends a streaming query with full message history
 func (c *AzureClient) QueryStreamWithHistory(messages []Message, onChunk func(content string), onDone func(resp *ChatResponse)) error {
+	return c.QueryStreamWithHistoryContext(context.Background(), messages, onChunk, onDone)
+}
+
+// QueryStreamWithHistoryContext sends a streaming query with full message history and context support
+func (c *AzureClient) QueryStreamWithHistoryContext(ctx context.Context, messages []Message, onChunk func(content string), onDone func(resp *ChatResponse)) error {
 	reqBody := ChatRequest{
 		Model:    c.config.Model,
 		Messages: messages,
@@ -171,7 +193,7 @@ func (c *AzureClient) QueryStreamWithHistory(messages []Message, onChunk func(co
 		return fmt.Errorf("failed to marshal request: %w", err)
 	}
 
-	req, err := http.NewRequest(http.MethodPost, c.config.GetAzureAPIURL(), bytes.NewBuffer(jsonData))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.config.GetAzureAPIURL(), bytes.NewBuffer(jsonData))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -203,6 +225,11 @@ func (c *AzureClient) QueryStreamWithHistory(messages []Message, onChunk func(co
 	reader := bufio.NewReader(resp.Body)
 
 	for {
+		// Check for context cancellation
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("request cancelled: %w", err)
+		}
+
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
@@ -227,6 +254,8 @@ func (c *AzureClient) QueryStreamWithHistory(messages []Message, onChunk func(co
 
 		var chunk ChatResponse
 		if err := json.Unmarshal([]byte(data), &chunk); err != nil {
+			// Log parse errors in verbose mode instead of silently ignoring
+			log.Printf("Failed to parse streaming chunk: %v (data: %s)", err, data)
 			continue
 		}
 

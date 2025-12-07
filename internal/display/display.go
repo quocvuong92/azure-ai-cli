@@ -43,7 +43,10 @@ func NewSpinner(message string) *Spinner {
 
 // Start begins the spinner animation
 func (sp *Spinner) Start() {
+	sp.mu.Lock()
 	sp.startTime = time.Now()
+	sp.mu.Unlock()
+
 	sp.s.Start()
 
 	sp.wg.Add(1)
@@ -56,8 +59,15 @@ func (sp *Spinner) Start() {
 			case <-sp.stopChan:
 				return
 			case <-ticker.C:
+				sp.mu.Lock()
+				if sp.stopped {
+					sp.mu.Unlock()
+					return
+				}
 				elapsed := time.Since(sp.startTime).Seconds()
-				sp.s.Suffix = fmt.Sprintf(" %s (%.1fs)", sp.message, elapsed)
+				message := sp.message
+				sp.mu.Unlock()
+				sp.s.Suffix = fmt.Sprintf(" %s (%.1fs)", message, elapsed)
 			}
 		}
 	}()
