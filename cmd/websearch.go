@@ -129,7 +129,6 @@ func (app *App) performWebSearch(query string) (string, error) {
 
 	ctx := context.Background()
 	var results *api.TavilyResponse
-	var err error
 
 	switch app.cfg.WebSearchProvider {
 	case "linkup":
@@ -173,10 +172,6 @@ func (app *App) performWebSearch(query string) (string, error) {
 	}
 
 	sp.Stop()
-
-	if err != nil {
-		return "", err
-	}
 
 	// Store results for citations
 	app.searchResults = results
