@@ -86,7 +86,7 @@ func (app *App) runInteractive() {
 		prompt.OptionSelectedDescriptionBGColor(prompt.LightGray),
 		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(10),
-		prompt.OptionCompletionOnDown(), // Enable arrow key navigation in suggestions
+		prompt.OptionCompletionOnDown(), // Enable down arrow for suggestions (up should also work)
 		prompt.OptionAddKeyBind(prompt.KeyBind{
 			Key: prompt.ControlC,
 			Fn: func(buf *prompt.Buffer) {
@@ -142,7 +142,7 @@ func (s *InteractiveSession) executor(input string) {
 
 	// Web search mode: automatically search for every message
 	if s.app.cfg.WebSearch {
-		s.app.handleWebSearch(input, &s.messages, s.client)
+		s.app.handleWebSearch(input, &s.messages, s.client, s.exec)
 		return
 	}
 
@@ -195,7 +195,7 @@ func (app *App) handleCommand(input string, messages *[]api.Message, client *api
 		app.handleModelCommand(parts)
 
 	case "/web":
-		app.handleWebCommand(parts, messages, client)
+		app.handleWebCommand(parts, messages, client, exec)
 
 	case "/allow-dangerous":
 		exec.GetPermissionManager().EnableDangerous()
@@ -237,7 +237,7 @@ func (app *App) handleModelCommand(parts []string) {
 	}
 }
 
-func (app *App) handleWebCommand(parts []string, messages *[]api.Message, client *api.AzureClient) {
+func (app *App) handleWebCommand(parts []string, messages *[]api.Message, client *api.AzureClient, exec *executor.Executor) {
 	if len(parts) < 2 {
 		status := "off"
 		if app.cfg.WebSearch {
@@ -279,7 +279,7 @@ func (app *App) handleWebCommand(parts []string, messages *[]api.Message, client
 		app.cfg.WebSearchProvider = strings.ToLower(arg)
 		fmt.Printf("Web search provider changed to: %s\n", app.cfg.WebSearchProvider)
 	default:
-		app.handleWebSearch(arg, messages, client)
+		app.handleWebSearch(arg, messages, client, exec)
 	}
 }
 
