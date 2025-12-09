@@ -87,6 +87,22 @@ func (app *App) runInteractive() {
 		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(10),
 		prompt.OptionCompletionOnDown(), // Enable arrow key navigation in suggestions
+		prompt.OptionAddKeyBind(prompt.KeyBind{
+			Key: prompt.ControlC,
+			Fn: func(buf *prompt.Buffer) {
+				fmt.Println("\nGoodbye!")
+				panic("exit")
+			},
+		}),
+		prompt.OptionAddKeyBind(prompt.KeyBind{
+			Key: prompt.ControlD,
+			Fn: func(buf *prompt.Buffer) {
+				if buf.Text() == "" {
+					fmt.Println("Goodbye!")
+					panic("exit")
+				}
+			},
+		}),
 	)
 
 	// Recover from panic used for exit
