@@ -81,6 +81,7 @@ func (app *App) runInteractive() {
 		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(10),
 		prompt.OptionShowCompletionAtStart(),
+		prompt.OptionCompletionOnDown(), // Use Down arrow for suggestions instead of history
 	)
 
 	p.Run()
