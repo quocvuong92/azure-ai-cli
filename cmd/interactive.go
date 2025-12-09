@@ -133,7 +133,6 @@ func (s *InteractiveSession) executor(input string) {
 	// Handle commands
 	if strings.HasPrefix(input, "/") {
 		if s.app.handleCommand(input, &s.messages, s.client, s.exec) {
-			fmt.Println("Goodbye!")
 			s.exitFlag = true
 			panic("exit") // Exit go-prompt
 		}
