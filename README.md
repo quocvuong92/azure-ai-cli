@@ -147,12 +147,6 @@ azure-ai -sri
 - ✅ 30-second execution timeout
 - ✅ Session-based allowlist
 
-See [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md) for security details.
-
-## 🤝 Contributing
-
-Contributions welcome! Please read [IMPLEMENTATION_GUIDE.md](IMPLEMENTATION_GUIDE.md) for implementation details.
-
 ## 📄 License
 
 MIT License - see [LICENSE](LICENSE) file for details.
