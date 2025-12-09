@@ -221,20 +221,21 @@ func ShowCommandBlocked(command, reason string) {
 // AskCommandConfirmation asks the user to confirm command execution
 // Returns: (allowed bool, always bool)
 func AskCommandConfirmation(command, reasoning string) (bool, bool) {
-	fmt.Fprintf(os.Stderr, "\n⚠️  Command Execution Request\n")
-	fmt.Fprintf(os.Stderr, "Command:  %s\n", command)
-	fmt.Fprintf(os.Stderr, "Reason:   %s\n", reasoning)
-	fmt.Fprintf(os.Stderr, "\nAllow? [y]es / [n]o / [a]lways: ")
+	fmt.Printf("\n⚠️  Command Execution Request\n")
+	fmt.Printf("Command:  %s\n", command)
+	fmt.Printf("Reason:   %s\n", reasoning)
+	fmt.Printf("\nAllow? [y]es / [n]o / [a]lways: ")
 
-	var response string
-	fmt.Scanln(&response)
-
-	response = strings.ToLower(strings.TrimSpace(response))
+	// Read single character from stdin
+	var buf [1]byte
+	os.Stdin.Read(buf[:])
+	response := strings.ToLower(string(buf[0]))
+	fmt.Println() // New line after input
 
 	switch response {
-	case "y", "yes":
+	case "y":
 		return true, false
-	case "a", "always":
+	case "a":
 		return true, true
 	default:
 		return false, false
