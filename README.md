@@ -5,7 +5,9 @@ A command-line client for Azure OpenAI API with optional web search powered by T
 ## Features
 
 - Chat with Azure OpenAI models (GPT-5.1, GPT-4o, etc.)
+- **AI-powered command execution** with intelligent permission system
 - Web search integration via Tavily, Linkup, or Brave Search API
+- Interactive mode with auto-completing suggestions
 - Streaming output support
 - Markdown rendering with syntax highlighting
 - Multiple API keys with automatic rotation (for free tier usage)
@@ -182,6 +184,80 @@ export BRAVE_API_KEYS="brave-key1,brave-key2"
 
 When one key hits rate limits (429) or is exhausted, the CLI automatically switches to the next key.
 
+## Command Execution
+
+The AI can execute shell commands to help you with tasks. This feature uses Azure OpenAI's function calling with an intelligent permission system.
+
+### How It Works
+
+When you ask the AI to perform a task that requires running commands, it will:
+
+1. **Decide** if a command is needed
+2. **Check permissions** based on command risk level
+3. **Ask for confirmation** if needed
+4. **Execute** the command
+5. **Return results** and explain what happened
+
+### Permission System
+
+Commands are classified into three risk levels:
+
+**🟢 Safe (Auto-Execute)**
+- Read-only commands that can't harm your system
+- Examples: `ls`, `cat`, `pwd`, `git status`, `npm list`
+- No confirmation needed - executes immediately
+
+**🟡 Needs Confirmation**
+- Commands that modify your system
+- Examples: `git commit`, `npm install`, `mkdir`, `rm`
+- AI asks: `Allow? [y]es / [n]o / [a]lways`
+- Choose "always" to trust the command for this session
+
+**🔴 Dangerous (Blocked)**
+- Potentially destructive commands
+- Examples: `rm -rf /`, `sudo`, `dd`, pipe-to-shell
+- Blocked by default unless you run `/allow-dangerous`
+
+### Examples
+
+```bash
+$ azure-ai -i
+> What files are in this directory?
+🔧 Executing: ls -la
+[shows directory listing]
+The directory contains...
+
+> Create a file called test.txt with "Hello World"
+⚠️  Command Execution Request
+Command:  echo "Hello World" > test.txt
+Reason:   User requested to create a file with content
+
+Allow? [y]es / [n]o / [a]lways: y
+🔧 Executing: echo "Hello World" > test.txt
+I've created test.txt with the content "Hello World".
+
+> Show me the git status
+🔧 Executing: git status
+[shows git status output]
+You're on the main branch with no uncommitted changes.
+```
+
+### Safety Features
+
+✅ Auto-approve safe reads - No friction for browsing  
+✅ Confirm writes - Always ask before modifying  
+✅ Block dangerous commands - Protect your system  
+✅ Allowlist support - Build trust over time with "always allow"  
+✅ 30-second timeout - Commands won't hang forever  
+✅ Exit code tracking - Proper error handling  
+
+### Controls
+
+- `/allow-dangerous` - Enable dangerous commands (still requires confirmation)
+- `/show-permissions` - View current permission settings
+- Answer `n` to deny a command
+- Answer `a` for "always allow" to skip future confirmations for that specific command
+
 ## Interactive Mode
 
 Start an interactive chat session with conversation history:
@@ -215,6 +291,10 @@ azure-ai -iwsr
 | `/web off` | Disable auto web search |
 | `/web` | Show current web search status |
 | `/model [name]` | Show or change the current model |
+| `/allow-dangerous` | Enable dangerous commands (with confirmation) |
+| `/show-permissions` | Show command execution permissions |
+
+**Note**: Type `/` to see auto-completing suggestions with descriptions. Use Tab or arrow keys to navigate.
 
 ### Example Session
 
