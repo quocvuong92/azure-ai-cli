@@ -194,3 +194,57 @@ func ShowCitations(citations []Citation) {
 		fmt.Printf("[%d] %s - %s\n", i+1, c.Title, c.URL)
 	}
 }
+
+// ShowCommandExecuting displays a message when a command is being executed
+func ShowCommandExecuting(command string) {
+	fmt.Fprintf(os.Stderr, "🔧 Executing: %s\n", command)
+}
+
+// ShowCommandOutput displays the output of a successfully executed command
+func ShowCommandOutput(output string) {
+	if output != "" {
+		fmt.Println(strings.TrimSpace(output))
+	}
+}
+
+// ShowCommandError displays an error from command execution
+func ShowCommandError(command string, err error) {
+	fmt.Fprintf(os.Stderr, "❌ Command failed: %s\nError: %v\n", command, err)
+}
+
+// ShowCommandBlocked displays a message when a command is blocked
+func ShowCommandBlocked(command, reason string) {
+	fmt.Fprintf(os.Stderr, "🚫 Command blocked: %s\n", command)
+	fmt.Fprintf(os.Stderr, "Reason: %s\n", reason)
+}
+
+// AskCommandConfirmation asks the user to confirm command execution
+// Returns: (allowed bool, always bool)
+func AskCommandConfirmation(command, reasoning string) (bool, bool) {
+	fmt.Fprintf(os.Stderr, "\n⚠️  Command Execution Request\n")
+	fmt.Fprintf(os.Stderr, "Command:  %s\n", command)
+	fmt.Fprintf(os.Stderr, "Reason:   %s\n", reasoning)
+	fmt.Fprintf(os.Stderr, "\nAllow? [y]es / [n]o / [a]lways: ")
+
+	var response string
+	fmt.Scanln(&response)
+
+	response = strings.ToLower(strings.TrimSpace(response))
+
+	switch response {
+	case "y", "yes":
+		return true, false
+	case "a", "always":
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// ShowPermissionSettings displays current permission settings
+func ShowPermissionSettings(settings map[string]interface{}) {
+	fmt.Println("Permission Settings:")
+	fmt.Printf("  Auto-allow safe commands: %v\n", settings["auto_allow_reads"])
+	fmt.Printf("  Dangerous mode enabled:   %v\n", settings["dangerous_enabled"])
+	fmt.Printf("  Commands in allowlist:    %v\n", settings["allowlist_count"])
+}
