@@ -366,10 +366,16 @@ func (app *App) sendInteractiveMessageWithTools(client *api.AzureClient, exec *e
 			toolCalls := resp.Choices[0].GetToolCalls()
 
 			// Add assistant message with tool calls to history
-			*messages = append(*messages, api.Message{
+			// Include content from response (may be empty, but structure matches API response)
+			assistantMsg := api.Message{
 				Role:      "assistant",
 				ToolCalls: toolCalls,
-			})
+			}
+			// Only set content if it's not empty
+			if resp.Choices[0].Message.Content != "" {
+				assistantMsg.Content = resp.Choices[0].Message.Content
+			}
+			*messages = append(*messages, assistantMsg)
 
 			// Process each tool call
 			for _, toolCall := range toolCalls {
