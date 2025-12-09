@@ -24,6 +24,12 @@ type InteractiveSession struct {
 
 // completer provides auto-suggestions for commands
 func (s *InteractiveSession) completer(d prompt.Document) []prompt.Suggest {
+	// Only show suggestions when input starts with "/"
+	text := d.TextBeforeCursor()
+	if !strings.HasPrefix(text, "/") {
+		return []prompt.Suggest{}
+	}
+
 	suggestions := []prompt.Suggest{
 		{Text: "/exit", Description: "Exit interactive mode"},
 		{Text: "/quit", Description: "Exit interactive mode"},
@@ -80,8 +86,6 @@ func (app *App) runInteractive() {
 		prompt.OptionSelectedDescriptionBGColor(prompt.LightGray),
 		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(10),
-		prompt.OptionShowCompletionAtStart(),
-		prompt.OptionCompletionOnDown(), // Use Down arrow for suggestions instead of history
 	)
 
 	p.Run()
