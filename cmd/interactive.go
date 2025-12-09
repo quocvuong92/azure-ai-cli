@@ -4,36 +4,45 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 
-	"github.com/chzyer/readline"
-
+	"github.com/c-bata/go-prompt"
 	"github.com/quocvuong92/azure-ai-cli/internal/api"
 	"github.com/quocvuong92/azure-ai-cli/internal/config"
 	"github.com/quocvuong92/azure-ai-cli/internal/display"
 	"github.com/quocvuong92/azure-ai-cli/internal/executor"
 )
 
-// Command items for autocomplete
-var commandItems = []readline.PrefixCompleterInterface{
-	readline.PcItem("/exit"),
-	readline.PcItem("/quit"),
-	readline.PcItem("/q"),
-	readline.PcItem("/clear"),
-	readline.PcItem("/c"),
-	readline.PcItem("/help"),
-	readline.PcItem("/h"),
-	readline.PcItem("/web",
-		readline.PcItem("on"),
-		readline.PcItem("off"),
-		readline.PcItem("tavily"),
-		readline.PcItem("linkup"),
-		readline.PcItem("brave"),
-	),
-	readline.PcItem("/model"),
-	readline.PcItem("/allow-dangerous"),
-	readline.PcItem("/show-permissions"),
+// InteractiveSession holds the state for interactive mode
+type InteractiveSession struct {
+	app      *App
+	client   *api.AzureClient
+	exec     *executor.Executor
+	messages []api.Message
+	exitFlag bool
+}
+
+// completer provides auto-suggestions for commands
+func (s *InteractiveSession) completer(d prompt.Document) []prompt.Suggest {
+	suggestions := []prompt.Suggest{
+		{Text: "/exit", Description: "Exit interactive mode"},
+		{Text: "/quit", Description: "Exit interactive mode"},
+		{Text: "/q", Description: "Exit interactive mode"},
+		{Text: "/clear", Description: "Clear conversation history"},
+		{Text: "/c", Description: "Clear conversation history"},
+		{Text: "/help", Description: "Show available commands"},
+		{Text: "/h", Description: "Show available commands"},
+		{Text: "/web on", Description: "Enable auto web search"},
+		{Text: "/web off", Description: "Disable auto web search"},
+		{Text: "/web tavily", Description: "Use Tavily search provider"},
+		{Text: "/web linkup", Description: "Use Linkup search provider"},
+		{Text: "/web brave", Description: "Use Brave search provider"},
+		{Text: "/model", Description: "Show/switch model"},
+		{Text: "/allow-dangerous", Description: "Enable dangerous commands (with confirmation)"},
+		{Text: "/show-permissions", Description: "Show command execution permissions"},
+	}
+
+	return prompt.FilterHasPrefix(suggestions, d.GetWordBeforeCursor(), true)
 }
 
 func (app *App) runInteractive() {
@@ -42,91 +51,76 @@ func (app *App) runInteractive() {
 	if app.cfg.WebSearch {
 		fmt.Printf("Web search: enabled (provider: %s)\n", app.cfg.WebSearchProvider)
 	}
-	fmt.Println("Type /help for commands, Ctrl+C to quit, Tab for autocomplete")
-	fmt.Println("Tip: End a line with \\ for multiline input")
+	fmt.Println("Type /help for commands, Ctrl+C or Ctrl+D to quit")
+	fmt.Println("Commands auto-complete as you type")
 	fmt.Println()
 
-	// Setup readline with autocomplete
-	completer := readline.NewPrefixCompleter(commandItems...)
+	session := &InteractiveSession{
+		app:    app,
+		client: api.NewAzureClient(app.cfg),
+		exec:   executor.NewExecutor(),
+		messages: []api.Message{
+			{Role: "system", Content: config.DefaultSystemMessage},
+		},
+		exitFlag: false,
+	}
 
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "> ",
-		AutoComplete:    completer,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-	})
-	if err != nil {
-		display.ShowError(err.Error())
+	p := prompt.New(
+		session.executor,
+		session.completer,
+		prompt.OptionPrefix("> "),
+		prompt.OptionTitle("Azure AI CLI"),
+		prompt.OptionPrefixTextColor(prompt.Green),
+		prompt.OptionSuggestionBGColor(prompt.DarkGray),
+		prompt.OptionSuggestionTextColor(prompt.White),
+		prompt.OptionSelectedSuggestionBGColor(prompt.LightGray),
+		prompt.OptionSelectedSuggestionTextColor(prompt.Black),
+		prompt.OptionDescriptionBGColor(prompt.DarkGray),
+		prompt.OptionDescriptionTextColor(prompt.White),
+		prompt.OptionSelectedDescriptionBGColor(prompt.LightGray),
+		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
+		prompt.OptionMaxSuggestion(10),
+		prompt.OptionShowCompletionAtStart(),
+	)
+
+	p.Run()
+}
+
+// executor handles the execution of each input line
+func (s *InteractiveSession) executor(input string) {
+	input = strings.TrimSpace(input)
+	if input == "" {
 		return
 	}
-	defer rl.Close()
 
-	client := api.NewAzureClient(app.cfg)
-	exec := executor.NewExecutor()
-	messages := []api.Message{
-		{Role: "system", Content: config.DefaultSystemMessage},
+	// Handle commands
+	if strings.HasPrefix(input, "/") {
+		if s.app.handleCommand(input, &s.messages, s.client, s.exec) {
+			fmt.Println("Goodbye!")
+			s.exitFlag = true
+		}
+		return
 	}
 
-	for {
-		line, err := rl.Readline()
-		if err != nil {
-			if err == readline.ErrInterrupt {
-				fmt.Println("Goodbye!")
-				return
-			} else if err == io.EOF {
-				fmt.Println("Goodbye!")
-				return
-			}
-			display.ShowError(fmt.Sprintf("Error reading input: %v", err))
-			continue
-		}
-
-		// Support multiline input with trailing backslash
-		input := line
-		for strings.HasSuffix(strings.TrimRight(input, " \t"), "\\") {
-			input = strings.TrimSuffix(strings.TrimRight(input, " \t"), "\\") + "\n"
-			rl.SetPrompt("... ")
-			nextLine, err := rl.Readline()
-			if err != nil {
-				break
-			}
-			input += nextLine
-		}
-		rl.SetPrompt("> ")
-
-		input = strings.TrimSpace(input)
-		if input == "" {
-			continue
-		}
-
-		// Handle commands
-		if strings.HasPrefix(input, "/") {
-			if app.handleCommand(input, &messages, client, exec) {
-				return
-			}
-			continue
-		}
-
-		// Web search mode: automatically search for every message
-		if app.cfg.WebSearch {
-			app.handleWebSearch(input, &messages, client)
-			continue
-		}
-
-		// Regular chat with tool support
-		messages = append(messages, api.Message{Role: "user", Content: input})
-		fmt.Println()
-		response, err := app.sendInteractiveMessageWithTools(client, exec, &messages)
-		if err != nil {
-			display.ShowError(err.Error())
-			messages = messages[:len(messages)-1]
-			continue
-		}
-		if response != "" {
-			messages = append(messages, api.Message{Role: "assistant", Content: response})
-		}
-		fmt.Println()
+	// Web search mode: automatically search for every message
+	if s.app.cfg.WebSearch {
+		s.app.handleWebSearch(input, &s.messages, s.client)
+		return
 	}
+
+	// Regular chat with tool support
+	s.messages = append(s.messages, api.Message{Role: "user", Content: input})
+	fmt.Println()
+	response, err := s.app.sendInteractiveMessageWithTools(s.client, s.exec, &s.messages)
+	if err != nil {
+		display.ShowError(err.Error())
+		s.messages = s.messages[:len(s.messages)-1]
+		return
+	}
+	if response != "" {
+		s.messages = append(s.messages, api.Message{Role: "assistant", Content: response})
+	}
+	fmt.Println()
 }
 
 func (app *App) handleCommand(input string, messages *[]api.Message, client *api.AzureClient, exec *executor.Executor) bool {
