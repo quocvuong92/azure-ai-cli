@@ -86,13 +86,29 @@ func (app *App) runInteractive() {
 		prompt.OptionSelectedDescriptionBGColor(prompt.LightGray),
 		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(10),
+		prompt.OptionCompletionOnDown(), // Enable arrow key navigation in suggestions
 	)
+
+	// Recover from panic used for exit
+	defer func() {
+		if r := recover(); r != nil {
+			if r != "exit" {
+				// Re-panic if it's not our exit signal
+				panic(r)
+			}
+		}
+	}()
 
 	p.Run()
 }
 
 // executor handles the execution of each input line
 func (s *InteractiveSession) executor(input string) {
+	// Check if we should exit
+	if s.exitFlag {
+		panic("exit") // Use panic to break out of go-prompt.Run()
+	}
+
 	input = strings.TrimSpace(input)
 	if input == "" {
 		return
@@ -103,6 +119,7 @@ func (s *InteractiveSession) executor(input string) {
 		if s.app.handleCommand(input, &s.messages, s.client, s.exec) {
 			fmt.Println("Goodbye!")
 			s.exitFlag = true
+			panic("exit") // Exit go-prompt
 		}
 		return
 	}
