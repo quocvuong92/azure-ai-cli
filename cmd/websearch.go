@@ -9,6 +9,7 @@ import (
 
 	"github.com/quocvuong92/azure-ai-cli/internal/api"
 	"github.com/quocvuong92/azure-ai-cli/internal/display"
+	"github.com/quocvuong92/azure-ai-cli/internal/executor"
 )
 
 func (app *App) optimizeSearchQuery(query string, messages []api.Message, client *api.AzureClient) (string, error) {
@@ -63,7 +64,7 @@ func (app *App) optimizeSearchQuery(query string, messages []api.Message, client
 	return optimizedQuery, nil
 }
 
-func (app *App) handleWebSearch(query string, messages *[]api.Message, client *api.AzureClient) {
+func (app *App) handleWebSearch(query string, messages *[]api.Message, client *api.AzureClient, exec *executor.Executor) {
 	// Optimize search query using LLM if there's conversation context
 	optimizedQuery := query
 	if len(*messages) > 1 { // More than just system message
@@ -93,23 +94,30 @@ func (app *App) handleWebSearch(query string, messages *[]api.Message, client *a
 		Content: fmt.Sprintf(WebContextMessageTemplate, searchContext),
 	}
 
-	// Build messages: existing history + web context + user question
-	messagesWithWeb := make([]api.Message, len(*messages))
-	copy(messagesWithWeb, *messages)
-	messagesWithWeb = append(messagesWithWeb, webContextMsg)
-	messagesWithWeb = append(messagesWithWeb, api.Message{Role: "user", Content: query})
+	// Add web context to messages temporarily
+	*messages = append(*messages, webContextMsg)
+	*messages = append(*messages, api.Message{Role: "user", Content: query})
 
-	// Send request
+	// Send request with tools support
 	fmt.Println()
-	response, err := app.sendInteractiveMessage(client, messagesWithWeb)
+	response, err := app.sendInteractiveMessageWithTools(client, exec, messages)
 	if err != nil {
 		display.ShowError(err.Error())
+		// Remove the messages we added on error
+		*messages = (*messages)[:len(*messages)-2]
 		return
 	}
 
-	// Add only the user message and response to history (not the web context)
-	*messages = append(*messages, api.Message{Role: "user", Content: query})
-	*messages = append(*messages, api.Message{Role: "assistant", Content: response})
+	// Remove web context from history, keep only user query and response
+	// Remove web context message (second to last before we added response)
+	*messages = append((*messages)[:len(*messages)-3], (*messages)[len(*messages)-2:]...)
+
+	if response != "" {
+		// Response is already added by sendInteractiveMessageWithTools
+	} else {
+		// If no response, add it manually
+		*messages = append(*messages, api.Message{Role: "assistant", Content: response})
+	}
 
 	// Show citations if enabled
 	if app.cfg.Citations && app.searchResults != nil && len(app.searchResults.Results) > 0 {
