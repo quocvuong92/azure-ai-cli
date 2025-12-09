@@ -1,34 +1,54 @@
 package cmd
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 
-	"github.com/chzyer/readline"
-
+	"github.com/c-bata/go-prompt"
 	"github.com/quocvuong92/azure-ai-cli/internal/api"
 	"github.com/quocvuong92/azure-ai-cli/internal/config"
 	"github.com/quocvuong92/azure-ai-cli/internal/display"
+	"github.com/quocvuong92/azure-ai-cli/internal/executor"
 )
 
-// Command items for autocomplete
-var commandItems = []readline.PrefixCompleterInterface{
-	readline.PcItem("/exit"),
-	readline.PcItem("/quit"),
-	readline.PcItem("/q"),
-	readline.PcItem("/clear"),
-	readline.PcItem("/c"),
-	readline.PcItem("/help"),
-	readline.PcItem("/h"),
-	readline.PcItem("/web",
-		readline.PcItem("on"),
-		readline.PcItem("off"),
-		readline.PcItem("tavily"),
-		readline.PcItem("linkup"),
-		readline.PcItem("brave"),
-	),
-	readline.PcItem("/model"),
+// InteractiveSession holds the state for interactive mode
+type InteractiveSession struct {
+	app      *App
+	client   *api.AzureClient
+	exec     *executor.Executor
+	messages []api.Message
+	exitFlag bool
+}
+
+// completer provides auto-suggestions for commands
+func (s *InteractiveSession) completer(d prompt.Document) []prompt.Suggest {
+	// Only show suggestions when input starts with "/"
+	text := d.TextBeforeCursor()
+	if !strings.HasPrefix(text, "/") {
+		return []prompt.Suggest{}
+	}
+
+	suggestions := []prompt.Suggest{
+		{Text: "/exit", Description: "Exit interactive mode"},
+		{Text: "/quit", Description: "Exit interactive mode"},
+		{Text: "/q", Description: "Exit interactive mode"},
+		{Text: "/clear", Description: "Clear conversation history"},
+		{Text: "/c", Description: "Clear conversation history"},
+		{Text: "/help", Description: "Show available commands"},
+		{Text: "/h", Description: "Show available commands"},
+		{Text: "/web on", Description: "Enable auto web search"},
+		{Text: "/web off", Description: "Disable auto web search"},
+		{Text: "/web tavily", Description: "Use Tavily search provider"},
+		{Text: "/web linkup", Description: "Use Linkup search provider"},
+		{Text: "/web brave", Description: "Use Brave search provider"},
+		{Text: "/model", Description: "Show/switch model"},
+		{Text: "/allow-dangerous", Description: "Enable dangerous commands (with confirmation)"},
+		{Text: "/show-permissions", Description: "Show command execution permissions"},
+	}
+
+	return prompt.FilterHasPrefix(suggestions, d.GetWordBeforeCursor(), true)
 }
 
 func (app *App) runInteractive() {
@@ -37,91 +57,111 @@ func (app *App) runInteractive() {
 	if app.cfg.WebSearch {
 		fmt.Printf("Web search: enabled (provider: %s)\n", app.cfg.WebSearchProvider)
 	}
-	fmt.Println("Type /help for commands, Ctrl+C to quit, Tab for autocomplete")
-	fmt.Println("Tip: End a line with \\ for multiline input")
+	fmt.Println("Type /help for commands, Ctrl+C or Ctrl+D to quit")
+	fmt.Println("Commands auto-complete as you type")
 	fmt.Println()
 
-	// Setup readline with autocomplete
-	completer := readline.NewPrefixCompleter(commandItems...)
-
-	rl, err := readline.NewEx(&readline.Config{
-		Prompt:          "> ",
-		AutoComplete:    completer,
-		InterruptPrompt: "^C",
-		EOFPrompt:       "exit",
-	})
-	if err != nil {
-		display.ShowError(err.Error())
-		return
-	}
-	defer rl.Close()
-
-	client := api.NewAzureClient(app.cfg)
-	messages := []api.Message{
-		{Role: "system", Content: config.DefaultSystemMessage},
+	session := &InteractiveSession{
+		app:    app,
+		client: api.NewAzureClient(app.cfg),
+		exec:   executor.NewExecutor(),
+		messages: []api.Message{
+			{Role: "system", Content: config.DefaultSystemMessage},
+		},
+		exitFlag: false,
 	}
 
-	for {
-		line, err := rl.Readline()
-		if err != nil {
-			if err == readline.ErrInterrupt {
-				fmt.Println("Goodbye!")
-				return
-			} else if err == io.EOF {
-				fmt.Println("Goodbye!")
-				return
+	p := prompt.New(
+		session.executor,
+		session.completer,
+		prompt.OptionPrefix("> "),
+		prompt.OptionTitle("Azure AI CLI"),
+		prompt.OptionPrefixTextColor(prompt.Green),
+		prompt.OptionSuggestionBGColor(prompt.DarkGray),
+		prompt.OptionSuggestionTextColor(prompt.White),
+		prompt.OptionSelectedSuggestionBGColor(prompt.LightGray),
+		prompt.OptionSelectedSuggestionTextColor(prompt.Black),
+		prompt.OptionDescriptionBGColor(prompt.DarkGray),
+		prompt.OptionDescriptionTextColor(prompt.White),
+		prompt.OptionSelectedDescriptionBGColor(prompt.LightGray),
+		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
+		prompt.OptionMaxSuggestion(10),
+		prompt.OptionCompletionOnDown(), // Enable down arrow for suggestions (up should also work)
+		prompt.OptionAddKeyBind(prompt.KeyBind{
+			Key: prompt.ControlC,
+			Fn: func(buf *prompt.Buffer) {
+				fmt.Println("\nGoodbye!")
+				panic("exit")
+			},
+		}),
+		prompt.OptionAddKeyBind(prompt.KeyBind{
+			Key: prompt.ControlD,
+			Fn: func(buf *prompt.Buffer) {
+				if buf.Text() == "" {
+					fmt.Println("Goodbye!")
+					panic("exit")
+				}
+			},
+		}),
+	)
+
+	// Recover from panic used for exit
+	defer func() {
+		if r := recover(); r != nil {
+			if r != "exit" {
+				// Re-panic if it's not our exit signal
+				panic(r)
 			}
-			display.ShowError(fmt.Sprintf("Error reading input: %v", err))
-			continue
 		}
+	}()
 
-		// Support multiline input with trailing backslash
-		input := line
-		for strings.HasSuffix(strings.TrimRight(input, " \t"), "\\") {
-			input = strings.TrimSuffix(strings.TrimRight(input, " \t"), "\\") + "\n"
-			rl.SetPrompt("... ")
-			nextLine, err := rl.Readline()
-			if err != nil {
-				break
-			}
-			input += nextLine
-		}
-		rl.SetPrompt("> ")
-
-		input = strings.TrimSpace(input)
-		if input == "" {
-			continue
-		}
-
-		// Handle commands
-		if strings.HasPrefix(input, "/") {
-			if app.handleCommand(input, &messages, client) {
-				return
-			}
-			continue
-		}
-
-		// Web search mode: automatically search for every message
-		if app.cfg.WebSearch {
-			app.handleWebSearch(input, &messages, client)
-			continue
-		}
-
-		// Regular chat
-		messages = append(messages, api.Message{Role: "user", Content: input})
-		fmt.Println()
-		response, err := app.sendInteractiveMessage(client, messages)
-		if err != nil {
-			display.ShowError(err.Error())
-			messages = messages[:len(messages)-1]
-			continue
-		}
-		messages = append(messages, api.Message{Role: "assistant", Content: response})
-		fmt.Println()
-	}
+	p.Run()
 }
 
-func (app *App) handleCommand(input string, messages *[]api.Message, client *api.AzureClient) bool {
+// executor handles the execution of each input line
+func (s *InteractiveSession) executor(input string) {
+	// Check if we should exit
+	if s.exitFlag {
+		panic("exit") // Use panic to break out of go-prompt.Run()
+	}
+
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return
+	}
+
+	// Handle commands
+	if strings.HasPrefix(input, "/") {
+		if s.app.handleCommand(input, &s.messages, s.client, s.exec) {
+			fmt.Println("Goodbye!")
+			s.exitFlag = true
+			panic("exit") // Exit go-prompt
+		}
+		return
+	}
+
+	// Web search mode: automatically search for every message
+	if s.app.cfg.WebSearch {
+		s.app.handleWebSearch(input, &s.messages, s.client, s.exec)
+		return
+	}
+
+	// Regular chat with tool support
+	s.messages = append(s.messages, api.Message{Role: "user", Content: input})
+	fmt.Println()
+	response, err := s.app.sendInteractiveMessageWithTools(s.client, s.exec, &s.messages)
+	if err != nil {
+		display.ShowError(err.Error())
+		s.messages = s.messages[:len(s.messages)-1]
+		return
+	}
+	if response != "" {
+		s.messages = append(s.messages, api.Message{Role: "assistant", Content: response})
+	}
+	fmt.Println()
+}
+
+func (app *App) handleCommand(input string, messages *[]api.Message, client *api.AzureClient, exec *executor.Executor) bool {
 	parts := strings.SplitN(input, " ", 2)
 	cmd := strings.ToLower(parts[0])
 
@@ -138,22 +178,33 @@ func (app *App) handleCommand(input string, messages *[]api.Message, client *api
 
 	case "/help", "/h":
 		fmt.Println("\nCommands:")
-		fmt.Printf("  %-18s %s\n", "/exit, /quit, /q", "Exit interactive mode")
-		fmt.Printf("  %-18s %s\n", "/clear, /c", "Clear conversation history")
-		fmt.Printf("  %-18s %s\n", "/web <query>", "Search web and ask about results")
-		fmt.Printf("  %-18s %s\n", "/web on", "Enable auto web search for all messages")
-		fmt.Printf("  %-18s %s\n", "/web off", "Disable auto web search")
-		fmt.Printf("  %-18s %s\n", "/web <provider>", "Switch provider (tavily, linkup, brave)")
-		fmt.Printf("  %-18s %s\n", "/model <name>", "Switch model")
-		fmt.Printf("  %-18s %s\n", "/model", "Show current model")
-		fmt.Printf("  %-18s %s\n", "/help, /h", "Show this help")
+		fmt.Printf("  %-24s %s\n", "/exit, /quit, /q", "Exit interactive mode")
+		fmt.Printf("  %-24s %s\n", "/clear, /c", "Clear conversation history")
+		fmt.Printf("  %-24s %s\n", "/web <query>", "Search web and ask about results")
+		fmt.Printf("  %-24s %s\n", "/web on", "Enable auto web search for all messages")
+		fmt.Printf("  %-24s %s\n", "/web off", "Disable auto web search")
+		fmt.Printf("  %-24s %s\n", "/web <provider>", "Switch provider (tavily, linkup, brave)")
+		fmt.Printf("  %-24s %s\n", "/model <name>", "Switch model")
+		fmt.Printf("  %-24s %s\n", "/model", "Show current model")
+		fmt.Printf("  %-24s %s\n", "/allow-dangerous", "Allow dangerous commands (with confirmation)")
+		fmt.Printf("  %-24s %s\n", "/show-permissions", "Show command execution permissions")
+		fmt.Printf("  %-24s %s\n", "/help, /h", "Show this help")
 		fmt.Println()
 
 	case "/model":
 		app.handleModelCommand(parts)
 
 	case "/web":
-		app.handleWebCommand(parts, messages, client)
+		app.handleWebCommand(parts, messages, client, exec)
+
+	case "/allow-dangerous":
+		exec.GetPermissionManager().EnableDangerous()
+		fmt.Println("⚠️  Dangerous commands enabled for this session")
+		fmt.Println("Note: You will still be asked to confirm before execution")
+
+	case "/show-permissions":
+		settings := exec.GetPermissionManager().GetSettings()
+		display.ShowPermissionSettings(settings)
 
 	default:
 		fmt.Printf("Unknown command: %s\n", cmd)
@@ -186,7 +237,7 @@ func (app *App) handleModelCommand(parts []string) {
 	}
 }
 
-func (app *App) handleWebCommand(parts []string, messages *[]api.Message, client *api.AzureClient) {
+func (app *App) handleWebCommand(parts []string, messages *[]api.Message, client *api.AzureClient, exec *executor.Executor) {
 	if len(parts) < 2 {
 		status := "off"
 		if app.cfg.WebSearch {
@@ -228,7 +279,7 @@ func (app *App) handleWebCommand(parts []string, messages *[]api.Message, client
 		app.cfg.WebSearchProvider = strings.ToLower(arg)
 		fmt.Printf("Web search provider changed to: %s\n", app.cfg.WebSearchProvider)
 	default:
-		app.handleWebSearch(arg, messages, client)
+		app.handleWebSearch(arg, messages, client, exec)
 	}
 }
 
@@ -292,4 +343,120 @@ func (app *App) sendInteractiveMessage(client *api.AzureClient, messages []api.M
 	}
 
 	return content, nil
+}
+
+func (app *App) sendInteractiveMessageWithTools(client *api.AzureClient, exec *executor.Executor, messages *[]api.Message) (string, error) {
+	ctx := context.Background()
+	tools := api.GetDefaultTools()
+
+	// Keep calling the API until there are no more tool calls
+	for {
+		sp := display.NewSpinner("Thinking...")
+		sp.Start()
+
+		resp, err := client.QueryWithHistoryAndToolsContext(ctx, *messages, tools)
+		sp.Stop()
+
+		if err != nil {
+			return "", err
+		}
+
+		// Check if there are tool calls
+		if len(resp.Choices) > 0 && resp.Choices[0].HasToolCalls() {
+			toolCalls := resp.Choices[0].GetToolCalls()
+
+			// Add assistant message with tool calls to history
+			// Include content from response (may be empty, but structure matches API response)
+			assistantMsg := api.Message{
+				Role:      "assistant",
+				ToolCalls: toolCalls,
+			}
+			// Only set content if it's not empty
+			if resp.Choices[0].Message.Content != "" {
+				assistantMsg.Content = resp.Choices[0].Message.Content
+			}
+			*messages = append(*messages, assistantMsg)
+
+			// Process each tool call
+			for _, toolCall := range toolCalls {
+				if toolCall.Function.Name == "execute_command" {
+					// Parse arguments
+					var args struct {
+						Command   string `json:"command"`
+						Reasoning string `json:"reasoning"`
+					}
+					if err := json.Unmarshal([]byte(toolCall.Function.Arguments), &args); err != nil {
+						display.ShowError(fmt.Sprintf("Failed to parse tool arguments: %v", err))
+						continue
+					}
+
+					// Check permission
+					allowed, needsConfirm, reason := exec.GetPermissionManager().CheckPermission(args.Command)
+
+					var result *executor.ExecutionResult
+					var toolResult string
+
+					if !allowed && !needsConfirm {
+						// Blocked
+						display.ShowCommandBlocked(args.Command, reason)
+						toolResult = fmt.Sprintf("Command blocked: %s", reason)
+					} else {
+						// Ask for confirmation if needed
+						if needsConfirm {
+							allow, always := display.AskCommandConfirmation(args.Command, args.Reasoning)
+							if !allow {
+								toolResult = "Command execution denied by user"
+								*messages = append(*messages, api.Message{
+									Role:       "tool",
+									Content:    toolResult,
+									ToolCallID: toolCall.ID,
+								})
+								continue
+							}
+							if always {
+								exec.GetPermissionManager().AddToAllowlist(args.Command)
+							}
+						}
+
+						// Execute the command
+						display.ShowCommandExecuting(args.Command)
+						result, err = exec.Execute(ctx, args.Command)
+
+						if err != nil || !result.IsSuccess() {
+							display.ShowCommandError(args.Command, result.Error)
+							toolResult = result.FormatResult()
+						} else {
+							display.ShowCommandOutput(result.Output)
+							toolResult = result.Output
+							if toolResult == "" {
+								toolResult = "Command executed successfully (no output)"
+							}
+						}
+					}
+
+					// Add tool result to messages
+					*messages = append(*messages, api.Message{
+						Role:       "tool",
+						Content:    toolResult,
+						ToolCallID: toolCall.ID,
+					})
+				}
+			}
+
+			// Continue loop to get AI's response to the tool results
+			continue
+		}
+
+		// No tool calls, display the final response
+		content := resp.GetContent()
+		if content != "" {
+			if app.cfg.Render {
+				display.ShowContentRendered(content)
+			} else {
+				display.ShowContent(content)
+			}
+		}
+
+		return content, nil
+	}
 }

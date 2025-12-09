@@ -17,14 +17,40 @@ import (
 
 // Message represents a chat message
 type Message struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string     `json:"role"`
+	Content    string     `json:"content,omitempty"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string     `json:"tool_call_id,omitempty"`
+}
+
+// Tool represents a function/tool that the AI can call
+type Tool struct {
+	Type     string   `json:"type"`
+	Function Function `json:"function"`
+}
+
+// Function represents a function definition
+type Function struct {
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	Parameters  interface{} `json:"parameters"`
+}
+
+// ToolCall represents a function call from the AI
+type ToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 // ChatRequest represents the Chat Completions API request
 type ChatRequest struct {
 	Model    string    `json:"model"`
 	Messages []Message `json:"messages"`
+	Tools    []Tool    `json:"tools,omitempty"`
 	Stream   bool      `json:"stream,omitempty"`
 }
 
@@ -37,8 +63,9 @@ type Usage struct {
 
 // Delta represents streaming delta content
 type Delta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string     `json:"role,omitempty"`
+	Content   string     `json:"content,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // Choice represents a response choice
@@ -47,6 +74,19 @@ type Choice struct {
 	Delta        Delta   `json:"delta,omitempty"`
 	Message      Message `json:"message,omitempty"`
 	FinishReason string  `json:"finish_reason,omitempty"`
+}
+
+// HasToolCalls checks if the choice contains tool calls
+func (c *Choice) HasToolCalls() bool {
+	return len(c.Message.ToolCalls) > 0 || len(c.Delta.ToolCalls) > 0
+}
+
+// GetToolCalls extracts tool calls from the choice
+func (c *Choice) GetToolCalls() []ToolCall {
+	if len(c.Message.ToolCalls) > 0 {
+		return c.Message.ToolCalls
+	}
+	return c.Delta.ToolCalls
 }
 
 // ChatResponse represents the API response
@@ -111,9 +151,15 @@ func (c *AzureClient) QueryWithHistory(messages []Message) (*ChatResponse, error
 
 // QueryWithHistoryContext sends a query with full message history and context support (non-streaming)
 func (c *AzureClient) QueryWithHistoryContext(ctx context.Context, messages []Message) (*ChatResponse, error) {
+	return c.QueryWithHistoryAndToolsContext(ctx, messages, nil)
+}
+
+// QueryWithHistoryAndToolsContext sends a query with full message history, tools, and context support (non-streaming)
+func (c *AzureClient) QueryWithHistoryAndToolsContext(ctx context.Context, messages []Message, tools []Tool) (*ChatResponse, error) {
 	reqBody := ChatRequest{
 		Model:    c.config.Model,
 		Messages: messages,
+		Tools:    tools,
 		Stream:   false,
 	}
 
@@ -182,9 +228,15 @@ func (c *AzureClient) QueryStreamWithHistory(messages []Message, onChunk func(co
 
 // QueryStreamWithHistoryContext sends a streaming query with full message history and context support
 func (c *AzureClient) QueryStreamWithHistoryContext(ctx context.Context, messages []Message, onChunk func(content string), onDone func(resp *ChatResponse)) error {
+	return c.QueryStreamWithHistoryAndToolsContext(ctx, messages, nil, onChunk, onDone)
+}
+
+// QueryStreamWithHistoryAndToolsContext sends a streaming query with full message history, tools, and context support
+func (c *AzureClient) QueryStreamWithHistoryAndToolsContext(ctx context.Context, messages []Message, tools []Tool, onChunk func(content string), onDone func(resp *ChatResponse)) error {
 	reqBody := ChatRequest{
 		Model:    c.config.Model,
 		Messages: messages,
+		Tools:    tools,
 		Stream:   true,
 	}
 
