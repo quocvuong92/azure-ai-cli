@@ -4,8 +4,8 @@ go 1.24.0
 
 require (
 	github.com/briandowns/spinner v1.23.2
+	github.com/c-bata/go-prompt v0.2.6
 	github.com/charmbracelet/glamour v0.10.0
-	github.com/chzyer/readline v1.5.1
 	github.com/spf13/cobra v1.8.1
 )
 
@@ -13,7 +13,6 @@ require (
 	github.com/alecthomas/chroma/v2 v2.14.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/aymerick/douceur v0.2.0 // indirect
-	github.com/c-bata/go-prompt v0.2.6 // indirect
 	github.com/charmbracelet/colorprofile v0.2.3-0.20250311203215-f60798e515dc // indirect
 	github.com/charmbracelet/lipgloss v1.1.1-0.20250404203927-76690c660834 // indirect
 	github.com/charmbracelet/x/ansi v0.10.1 // indirect
