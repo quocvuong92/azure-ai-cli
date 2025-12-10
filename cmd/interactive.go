@@ -6,7 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/c-bata/go-prompt"
+	"github.com/elk-language/go-prompt"
+	istrings "github.com/elk-language/go-prompt/strings"
 	"github.com/quocvuong92/azure-ai-cli/internal/api"
 	"github.com/quocvuong92/azure-ai-cli/internal/config"
 	"github.com/quocvuong92/azure-ai-cli/internal/display"
@@ -23,11 +24,15 @@ type InteractiveSession struct {
 }
 
 // completer provides auto-suggestions for commands
-func (s *InteractiveSession) completer(d prompt.Document) []prompt.Suggest {
+func (s *InteractiveSession) completer(d prompt.Document) ([]prompt.Suggest, istrings.RuneNumber, istrings.RuneNumber) {
 	// Only show suggestions when input starts with "/"
 	text := d.TextBeforeCursor()
+	endIndex := d.CurrentRuneIndex()
+	w := d.GetWordBeforeCursor()
+	startIndex := endIndex - istrings.RuneCountInString(w)
+
 	if !strings.HasPrefix(text, "/") {
-		return []prompt.Suggest{}
+		return []prompt.Suggest{}, startIndex, endIndex
 	}
 
 	suggestions := []prompt.Suggest{
@@ -48,7 +53,7 @@ func (s *InteractiveSession) completer(d prompt.Document) []prompt.Suggest {
 		{Text: "/show-permissions", Description: "Show command execution permissions"},
 	}
 
-	return prompt.FilterHasPrefix(suggestions, d.GetWordBeforeCursor(), true)
+	return prompt.FilterHasPrefix(suggestions, w, true), startIndex, endIndex
 }
 
 func (app *App) runInteractive() {
@@ -73,47 +78,42 @@ func (app *App) runInteractive() {
 
 	p := prompt.New(
 		session.executor,
-		session.completer,
-		prompt.OptionPrefix("> "),
-		prompt.OptionTitle("Azure AI CLI"),
-		prompt.OptionPrefixTextColor(prompt.Green),
-		prompt.OptionSuggestionBGColor(prompt.DarkGray),
-		prompt.OptionSuggestionTextColor(prompt.White),
-		prompt.OptionSelectedSuggestionBGColor(prompt.LightGray),
-		prompt.OptionSelectedSuggestionTextColor(prompt.Black),
-		prompt.OptionDescriptionBGColor(prompt.DarkGray),
-		prompt.OptionDescriptionTextColor(prompt.White),
-		prompt.OptionSelectedDescriptionBGColor(prompt.LightGray),
-		prompt.OptionSelectedDescriptionTextColor(prompt.Black),
-		prompt.OptionMaxSuggestion(10),
-		prompt.OptionCompletionOnDown(), // Enable down arrow for suggestions (up should also work)
-		prompt.OptionAddKeyBind(prompt.KeyBind{
+		prompt.WithCompleter(session.completer),
+		prompt.WithPrefix("> "),
+		prompt.WithTitle("Azure AI CLI"),
+		prompt.WithPrefixTextColor(prompt.Green),
+		prompt.WithSuggestionBGColor(prompt.DarkGray),
+		prompt.WithSuggestionTextColor(prompt.White),
+		prompt.WithSelectedSuggestionBGColor(prompt.LightGray),
+		prompt.WithSelectedSuggestionTextColor(prompt.Black),
+		prompt.WithDescriptionBGColor(prompt.DarkGray),
+		prompt.WithDescriptionTextColor(prompt.White),
+		prompt.WithSelectedDescriptionBGColor(prompt.LightGray),
+		prompt.WithSelectedDescriptionTextColor(prompt.Black),
+		prompt.WithMaxSuggestion(10),
+		prompt.WithCompletionOnDown(),
+		prompt.WithExitChecker(func(in string, breakline bool) bool {
+			return session.exitFlag
+		}),
+		prompt.WithKeyBind(prompt.KeyBind{
 			Key: prompt.ControlC,
-			Fn: func(buf *prompt.Buffer) {
+			Fn: func(p *prompt.Prompt) bool {
 				fmt.Println("\nGoodbye!")
-				panic("exit")
+				session.exitFlag = true
+				return false
 			},
 		}),
-		prompt.OptionAddKeyBind(prompt.KeyBind{
+		prompt.WithKeyBind(prompt.KeyBind{
 			Key: prompt.ControlD,
-			Fn: func(buf *prompt.Buffer) {
-				if buf.Text() == "" {
+			Fn: func(p *prompt.Prompt) bool {
+				if p.Buffer().Text() == "" {
 					fmt.Println("Goodbye!")
-					panic("exit")
+					session.exitFlag = true
 				}
+				return false
 			},
 		}),
 	)
-
-	// Recover from panic used for exit
-	defer func() {
-		if r := recover(); r != nil {
-			if r != "exit" {
-				// Re-panic if it's not our exit signal
-				panic(r)
-			}
-		}
-	}()
 
 	p.Run()
 }
@@ -122,7 +122,7 @@ func (app *App) runInteractive() {
 func (s *InteractiveSession) executor(input string) {
 	// Check if we should exit
 	if s.exitFlag {
-		panic("exit") // Use panic to break out of go-prompt.Run()
+		return
 	}
 
 	input = strings.TrimSpace(input)
@@ -134,7 +134,6 @@ func (s *InteractiveSession) executor(input string) {
 	if strings.HasPrefix(input, "/") {
 		if s.app.handleCommand(input, &s.messages, s.client, s.exec) {
 			s.exitFlag = true
-			panic("exit") // Exit go-prompt
 		}
 		return
 	}
