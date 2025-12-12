@@ -1,5 +1,7 @@
 # Azure AI CLI
 
+> **⚠️ DEPRECATED**: This project has been moved to [https://github.com/quocvuong92/ai-cli](https://github.com/quocvuong92/ai-cli). Please use the new repository for the latest updates and features.
+
 A modern command-line interface for Azure OpenAI with AI-powered command execution, web search, and interactive chat.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
